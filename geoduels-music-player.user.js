@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         GeoDuels Lofi / Chill Player
 // @namespace    https://geoduels.io/
-// @version      2.2.2
-// @description  Minimal Lofi / Chill player for GeoDuels. Fixes audio delay/buffer issues.
+// @version      2.2.3
+// @description  Minimal Lofi / Chill player for GeoDuels.
 // @match        https://geoduels.io/*
 // @match        https://*.geoduels.io/*
 // @noframes
@@ -22,6 +22,7 @@
         volume: 0.55,
         autoplay: true,
         disabled: false,
+        uiHidden: false,
         scopes: { lobby: true, single: false, duel: false },
         position: null
     };
@@ -35,6 +36,7 @@
         volume: Number.isFinite(saved.volume) ? saved.volume : defaults.volume,
         autoplay: typeof saved.autoplay === "boolean" ? saved.autoplay : defaults.autoplay,
         disabled: typeof saved.disabled === "boolean" ? saved.disabled : defaults.disabled,
+        uiHidden: typeof saved.uiHidden === "boolean" ? saved.uiHidden : defaults.uiHidden,
         scopes: { ...defaults.scopes, ...(saved.scopes || {}) },
         position: saved.position || null
     };
@@ -101,7 +103,8 @@
 
         const place = context();
         const isScopeActive = !!settings.scopes[place];
-        root.hidden = !isScopeActive;
+        
+        root.hidden = !isScopeActive || settings.uiHidden;
         panel.hidden = !expanded;
         
         if (!isScopeActive) {
@@ -251,7 +254,7 @@
                     <span class="gdl-pause-icon"><i></i><i></i></span>
                 </button>
                 <button class="gdl-settings" type="button" title="Settings" aria-label="Settings">⚙</button>
-                <button class="gdl-minimize" type="button" title="Minimize UI (Alt + H)" aria-label="Minimize">–</button>
+                <button class="gdl-minimize" type="button" title="Hide UI (Alt + H)" aria-label="Hide UI">–</button>
             </div>
             <div class="gdl-panel" hidden>
                 <label>Play in</label>
@@ -265,7 +268,7 @@
                 </div>
                 <label>Volume</label>
                 <input class="gdl-volume" type="range" min="0" max="100" aria-label="Volume">
-                <p class="gdl-note">Alt+H: Min/Show | Alt+P: Play<br>Alt+↑/↓: Vol | Alt+Shift+M: App</p>
+                <p class="gdl-note">Alt+H: Hide/Show UI | Alt+P: Play<br>Alt+↑/↓: Vol | Alt+Shift+M: App</p>
                 <button class="gdl-shutdown-btn" type="button">Shutdown App</button>
             </div>
         </div>`;
@@ -302,13 +305,10 @@
         });
 
         root.querySelector(".gdl-minimize").addEventListener("click", () => {
-            const place = context();
-            settings.scopes[place] = false;
+            settings.uiHidden = true;
             save();
             updateContext();
-            const targetBox = root?.querySelector(`[data-scope="${place}"]`);
-            if (targetBox) targetBox.checked = false;
-            showToast("UI Minimized. Press Alt + H to restore.");
+            showToast("UI Hidden. Press Alt + H to restore.");
         });
 
         root.querySelector(".gdl-shutdown-btn").addEventListener("click", () => {
@@ -389,14 +389,10 @@
 
         if (event.altKey && !event.ctrlKey && !event.shiftKey && (event.key === 'h' || event.key === 'H')) {
             event.preventDefault();
-            const place = context();
-            const willShow = !settings.scopes[place];
-            settings.scopes[place] = willShow;
+            settings.uiHidden = !settings.uiHidden;
             save();
             updateContext();
-            const targetBox = root?.querySelector(`[data-scope="${place}"]`);
-            if (targetBox) targetBox.checked = willShow;
-            showToast(willShow ? `UI Restored (${place})` : `UI Minimized (Alt + H to restore)`);
+            showToast(settings.uiHidden ? "UI Hidden (Alt + H to restore)" : "UI Restored");
             return;
         }
 
