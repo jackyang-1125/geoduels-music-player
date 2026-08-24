@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         GeoDuels Lofi / Chill Player
 // @namespace    https://geoduels.io/
-// @version      3.1.0
-// @description  Modern music player for GeoDuels with Ranked & Party Duel detection, glass UI, and slider switches.
+// @version      3.2.1
+// @description  Modern music player for GeoDuels with Ranked & Party detection, auto-hide on inactive scenes, and sleek switches.
 // @match        https://geoduels.io/*
 // @match        https://*.geoduels.io/*
 // @noframes
@@ -15,7 +15,7 @@
 
     if (window.top !== window.self) return;
 
-    const KEY = "geoduels-lofi-player:v3.1";
+    const KEY = "geoduels-lofi-player:v3.2";
     
     const STREAMS = [
         { name: "Chillsynth", url: "https://stream.nightride.fm/chillsynth.mp3" },
@@ -32,6 +32,7 @@
         volume: 0.55,
         autoplay: true,
         userWantsPlaying: true,
+        autoHideInactive: true,
         disabled: false,
         uiHidden: false,
         streamIndex: 0,
@@ -48,6 +49,7 @@
         volume: Number.isFinite(saved.volume) ? saved.volume : defaults.volume,
         autoplay: typeof saved.autoplay === "boolean" ? saved.autoplay : defaults.autoplay,
         userWantsPlaying: typeof saved.userWantsPlaying === "boolean" ? saved.userWantsPlaying : defaults.userWantsPlaying,
+        autoHideInactive: typeof saved.autoHideInactive === "boolean" ? saved.autoHideInactive : defaults.autoHideInactive,
         disabled: typeof saved.disabled === "boolean" ? saved.disabled : defaults.disabled,
         uiHidden: typeof saved.uiHidden === "boolean" ? saved.uiHidden : defaults.uiHidden,
         streamIndex: Number.isInteger(saved.streamIndex) && saved.streamIndex >= 0 && saved.streamIndex < STREAMS.length ? saved.streamIndex : defaults.streamIndex,
@@ -63,7 +65,7 @@
     audio.preload = "none";
     audio.volume = Math.max(0, Math.min(1, settings.volume));
 
-    let root, playButton, settingsButton, minimizeButton, panel, volumeSlider, autoplayInput, streamSelect;
+    let root, playButton, settingsButton, minimizeButton, panel, volumeSlider, autoplayInput, autoHideInput, streamSelect;
     let expanded = false;
     let pendingAutoplay = false;
 
@@ -109,12 +111,11 @@
         }, 3000);
     }
 
-    // 核心場景精確檢測：區分 Lobby / Solo / Ranked Duel / Party Duel
     function context() {
         const path = location.pathname.toLowerCase();
         const search = location.search.toLowerCase();
 
-        // 1. 派對房間 / 自訂遊戲 (Party / Room / 2v2)
+        // 1. Party / Custom Game Rooms
         if (path.includes("/party") || path.includes("/room") || path.includes("/custom") || search.includes("party") || search.includes("room")) {
             return "partyduel";
         }
@@ -122,14 +123,13 @@
             return "partyduel";
         }
 
-        // 2. 單人模式 (Singleplayer)
+        // 2. Singleplayer Mode
         if (path.startsWith("/single") || path.includes("/singleplayer") || search.includes("single")) {
             return "single";
         }
 
-        // 3. 對戰進行中判斷 (Match / Duel)
+        // 3. Active Gameplay Match Detection
         if (/^\/(match|game|duel|play)(\/|$)/i.test(path)) {
-            // 檢查是否為 Party 模式的比賽
             const isPartyMatch = document.querySelector('[data-mode="party"], [data-testid="party-badge"]') ||
                                  document.body.innerText.includes("Party Duel") ||
                                  document.body.innerText.includes("Custom Match");
@@ -143,13 +143,12 @@
             return "rankduel";
         }
 
-        // 4. 根據畫面上的特徵元件兜底判定
+        // 4. Element Fallback Checks
         const timerPill = document.querySelector('[data-testid="timer-pill"]');
         const minimap = document.querySelector('[data-testid="minimap-panel"]');
         if (timerPill) return "rankduel";
         if (minimap) return "single";
 
-        // 預設為大廳
         return "lobby";
     }
 
@@ -169,12 +168,16 @@
             return;
         }
 
-        // 控制器顯示僅由 Alt+H 控制，各模式取消勾選只會停止音樂不會關閉介面
-        root.hidden = settings.uiHidden;
-
         const place = context();
         const isScopeActive = !!settings.scopes[place];
         
+        const shouldHide = settings.uiHidden || (!isScopeActive && settings.autoHideInactive);
+        root.hidden = shouldHide;
+
+        if (shouldHide) {
+            togglePanel(false);
+        }
+
         if (!isScopeActive) {
             if (!audio.paused) {
                 audio.pause();
@@ -510,10 +513,10 @@
                 display: flex;
                 align-items: center;
                 justify-content: space-between;
-                margin: 9px 0 6px;
+                margin: 8px 0 4px;
             }
             #geoduels-lofi-player .gdl-toggle-label {
-                font-size: 11px;
+                font-size: 10.5px;
                 color: #cbd5e1;
                 font-weight: 500;
                 cursor: pointer;
@@ -660,6 +663,14 @@
             </div>
 
             <div class="gdl-toggle-row">
+                <label class="gdl-toggle-label" for="gdl-autohide-cb">Hide when inactive</label>
+                <label class="gdl-switch">
+                    <input id="gdl-autohide-cb" class="gdl-autohide" type="checkbox">
+                    <span class="gdl-slider"></span>
+                </label>
+            </div>
+
+            <div class="gdl-toggle-row">
                 <label class="gdl-toggle-label" for="gdl-autoplay-cb">Autoplay on Load</label>
                 <label class="gdl-switch">
                     <input id="gdl-autoplay-cb" class="gdl-autoplay" type="checkbox">
@@ -689,6 +700,7 @@
         panel = root.querySelector(".gdl-panel");
         volumeSlider = root.querySelector(".gdl-volume");
         autoplayInput = root.querySelector(".gdl-autoplay");
+        autoHideInput = root.querySelector(".gdl-autohide");
         streamSelect = root.querySelector(".gdl-station-select");
 
         streamSelect.value = String(settings.streamIndex);
@@ -703,6 +715,14 @@
                 save();
                 updateContext();
             });
+        });
+
+        autoHideInput.checked = settings.autoHideInactive;
+        autoHideInput.addEventListener("change", () => {
+            settings.autoHideInactive = autoHideInput.checked;
+            save();
+            updateContext();
+            showToast(settings.autoHideInactive ? "Auto-hide when inactive enabled" : "Auto-hide disabled (Always visible)");
         });
 
         autoplayInput.checked = settings.autoplay;
@@ -812,11 +832,17 @@
 
         if (event.altKey && !event.ctrlKey && !event.shiftKey && (event.key === 'h' || event.key === 'H')) {
             event.preventDefault();
-            settings.uiHidden = !settings.uiHidden;
-            if (settings.uiHidden) togglePanel(false);
+            if (root && root.hidden) {
+                settings.uiHidden = false;
+                root.hidden = false;
+                showToast("UI Restored");
+            } else {
+                settings.uiHidden = !settings.uiHidden;
+                if (settings.uiHidden) togglePanel(false);
+                showToast(settings.uiHidden ? "UI Hidden (Alt + H to restore)" : "UI Restored");
+            }
             save();
             updateContext();
-            showToast(settings.uiHidden ? "UI Hidden (Alt + H to restore)" : "UI Restored");
             return;
         }
 
