@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         GeoDuels Lofi / Chill Player
 // @namespace    https://geoduels.io/
-// @version      2.3.3
-// @description  Minimal music player for GeoDuels with multi-genre radio stations.
+// @version      3.1.0
+// @description  Modern music player for GeoDuels with Ranked & Party Duel detection, glass UI, and slider switches.
 // @match        https://geoduels.io/*
 // @match        https://*.geoduels.io/*
 // @noframes
@@ -15,7 +15,7 @@
 
     if (window.top !== window.self) return;
 
-    const KEY = "geoduels-lofi-player:v2";
+    const KEY = "geoduels-lofi-player:v3.1";
     
     const STREAMS = [
         { name: "Chillsynth", url: "https://stream.nightride.fm/chillsynth.mp3" },
@@ -35,7 +35,7 @@
         disabled: false,
         uiHidden: false,
         streamIndex: 0,
-        scopes: { lobby: true, single: false, duel: false },
+        scopes: { lobby: true, single: false, rankduel: false, partyduel: false },
         position: null
     };
 
@@ -63,7 +63,8 @@
     audio.preload = "none";
     audio.volume = Math.max(0, Math.min(1, settings.volume));
 
-    let root, playButton, panel, volume, autoplayInput, streamSelect, expanded = false;
+    let root, playButton, settingsButton, minimizeButton, panel, volumeSlider, autoplayInput, streamSelect;
+    let expanded = false;
     let pendingAutoplay = false;
 
     function save() {
@@ -79,16 +80,20 @@
                 position: fixed;
                 bottom: 24px;
                 left: 50%;
-                transform: translateX(-50%);
-                background: rgba(11, 18, 29, 0.95);
-                border: 1px solid #65d4a6;
-                color: #fff;
-                padding: 8px 16px;
-                border-radius: 20px;
-                font: 12px/1.4 system-ui, sans-serif;
+                transform: translateX(-50%) translateY(10px);
+                background: rgba(13, 20, 30, 0.94);
+                backdrop-filter: blur(14px);
+                -webkit-backdrop-filter: blur(14px);
+                border: 1px solid rgba(52, 211, 153, 0.4);
+                color: #f1f5f9;
+                padding: 7px 16px;
+                border-radius: 999px;
+                font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+                font-size: 11.5px;
+                font-weight: 500;
                 z-index: 2147483647;
-                box-shadow: 0 4px 14px rgba(0,0,0,0.4);
-                transition: opacity 0.3s, transform 0.3s;
+                box-shadow: 0 8px 24px rgba(0,0,0,0.5), 0 0 10px rgba(52, 211, 153, 0.15);
+                transition: opacity 0.25s cubic-bezier(0.16, 1, 0.3, 1), transform 0.25s cubic-bezier(0.16, 1, 0.3, 1);
                 pointer-events: none;
                 opacity: 0;
             `;
@@ -101,19 +106,50 @@
         toast._timer = setTimeout(() => {
             toast.style.opacity = "0";
             toast.style.transform = "translateX(-50%) translateY(10px)";
-        }, 3200);
+        }, 3000);
     }
 
+    // 核心場景精確檢測：區分 Lobby / Solo / Ranked Duel / Party Duel
     function context() {
-        const path = location.pathname;
-        if (/^\/(match|game|duel|single|play)(\/|$)/i.test(path)) {
-            if (/duel/i.test(path) || document.querySelector('[data-testid="timer-pill"]')) return "duel";
+        const path = location.pathname.toLowerCase();
+        const search = location.search.toLowerCase();
+
+        // 1. 派對房間 / 自訂遊戲 (Party / Room / 2v2)
+        if (path.includes("/party") || path.includes("/room") || path.includes("/custom") || search.includes("party") || search.includes("room")) {
+            return "partyduel";
+        }
+        if (document.querySelector('[data-testid*="party"], [data-testid*="room"], .party-lobby, .room-lobby')) {
+            return "partyduel";
+        }
+
+        // 2. 單人模式 (Singleplayer)
+        if (path.startsWith("/single") || path.includes("/singleplayer") || search.includes("single")) {
             return "single";
         }
+
+        // 3. 對戰進行中判斷 (Match / Duel)
+        if (/^\/(match|game|duel|play)(\/|$)/i.test(path)) {
+            // 檢查是否為 Party 模式的比賽
+            const isPartyMatch = document.querySelector('[data-mode="party"], [data-testid="party-badge"]') ||
+                                 document.body.innerText.includes("Party Duel") ||
+                                 document.body.innerText.includes("Custom Match");
+            if (isPartyMatch) return "partyduel";
+
+            const timerPill = document.querySelector('[data-testid="timer-pill"]');
+            const minimap = document.querySelector('[data-testid="minimap-panel"]');
+
+            if (timerPill || /duel/i.test(path)) return "rankduel";
+            if (minimap) return "single";
+            return "rankduel";
+        }
+
+        // 4. 根據畫面上的特徵元件兜底判定
         const timerPill = document.querySelector('[data-testid="timer-pill"]');
         const minimap = document.querySelector('[data-testid="minimap-panel"]');
-        if (timerPill && (timerPill.offsetWidth || timerPill.offsetHeight)) return "duel";
-        if (minimap && (minimap.offsetWidth || minimap.offsetHeight)) return "single";
+        if (timerPill) return "rankduel";
+        if (minimap) return "single";
+
+        // 預設為大廳
         return "lobby";
     }
 
@@ -128,19 +164,24 @@
         if (!root) return;
         if (settings.disabled) {
             root.hidden = true;
-            panel.hidden = true;
+            togglePanel(false);
             suspendAudio();
             return;
         }
 
+        // 控制器顯示僅由 Alt+H 控制，各模式取消勾選只會停止音樂不會關閉介面
+        root.hidden = settings.uiHidden;
+
         const place = context();
         const isScopeActive = !!settings.scopes[place];
         
-        root.hidden = !isScopeActive || settings.uiHidden;
-        panel.hidden = !expanded;
-        
         if (!isScopeActive) {
-            suspendAudio();
+            if (!audio.paused) {
+                audio.pause();
+                pendingAutoplay = false;
+                render();
+                emit();
+            }
         } else {
             if (settings.userWantsPlaying) {
                 if (audio.paused && !pendingAutoplay) {
@@ -152,11 +193,17 @@
         }
     }
 
+    function togglePanel(open) {
+        expanded = typeof open === "boolean" ? open : !expanded;
+        if (panel) panel.classList.toggle("is-open", expanded);
+        if (settingsButton) settingsButton.classList.toggle("is-active", expanded);
+    }
+
     function render() {
         if (!root) return;
         playButton.classList.toggle("is-playing", !audio.paused);
         playButton.setAttribute("aria-label", audio.paused ? "Play" : "Pause");
-        volume.value = String(Math.round(audio.volume * 100));
+        volumeSlider.value = String(Math.round(audio.volume * 100));
         if (streamSelect) streamSelect.value = String(settings.streamIndex);
     }
 
@@ -177,7 +224,7 @@
         }).catch(() => {
             pendingAutoplay = true;
             const unlock = () => {
-                if (pendingAutoplay && audio.paused && settings.userWantsPlaying && !settings.disabled && settings.scopes[context()]) {
+                if (pendingAutoplay && audio.paused && settings.userWantsPlaying && !settings.disabled) {
                     play();
                 }
                 window.removeEventListener("pointerdown", unlock);
@@ -220,10 +267,10 @@
         settings.userWantsPlaying = false;
         audio.pause();
         audio.removeAttribute("src");
-        expanded = false;
+        togglePanel(false);
         save();
         updateContext();
-        showToast("Player completely shut down. Press Alt + Shift + M to restart.");
+        showToast("Player shut down. Press Alt + Shift + M to restart.");
     }
 
     function revive() {
@@ -255,75 +302,392 @@
             #geoduels-lofi-player {
                 position: fixed;
                 z-index: 2147483647;
-                top: 18px;
-                right: 190px;
-                width: 108px;
-                color: #fff;
-                font: 12px/1 system-ui, sans-serif;
+                top: 20px;
+                right: 180px;
+                color: #f1f5f9;
+                font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+                font-size: 12px;
                 touch-action: none;
                 user-select: none;
                 -webkit-user-select: none;
                 -webkit-user-drag: none;
             }
-            #geoduels-lofi-player[hidden] { display: none !important; }
-            #geoduels-lofi-player .gdl-card { border: 1px solid #65d4a6; border-radius: 9px; background: #0b121ded; box-shadow: 0 4px 18px #0008; backdrop-filter: blur(4px); }
-            #geoduels-lofi-player .gdl-row { display: flex; gap: 4px; padding: 6px; }
-            #geoduels-lofi-player button { border: 0; border-radius: 5px; padding: 7px 8px; color: #fff; background: #ffffff18; cursor: pointer; font: inherit; font-weight: 700; transition: background 0.15s, color 0.15s; }
-            #geoduels-lofi-player button:hover { background: #ffffff33; }
-            #geoduels-lofi-player .gdl-play { display: grid; width: 30px; place-items: center; background: #168f63; }
-            .gdl-play-icon { font-size: 12px; }
-            .gdl-pause-icon { display: none; gap: 3px; }
-            .gdl-pause-icon i { display: block; width: 3px; height: 12px; border-radius: 1px; background: #fff; }
-            #geoduels-lofi-player .gdl-play.is-playing .gdl-play-icon { display: none; }
-            #geoduels-lofi-player .gdl-play.is-playing .gdl-pause-icon { display: flex; }
-            #geoduels-lofi-player .gdl-minimize { color: #a0aec0; }
-            #geoduels-lofi-player .gdl-minimize:hover { background: rgba(255, 255, 255, 0.25); color: #fff; }
-            #geoduels-lofi-player .gdl-panel { position: absolute; top: 43px; right: 0; width: 160px; padding: 7px; border: 1px solid #65d4a6; border-radius: 8px; background: #0b121df7; box-shadow: 0 4px 18px #0008; }
-            #geoduels-lofi-player label { display: block; margin: 6px 0 3px; color: #c7d4df; font-size: 10px; }
-            #geoduels-lofi-player select { width: 100%; box-sizing: border-box; background: #152331; color: #fff; border: 1px solid #405669; border-radius: 4px; padding: 4px; font-size: 10px; outline: none; }
-            #geoduels-lofi-player .gdl-scopes { display: flex; gap: 5px; }
-            #geoduels-lofi-player .gdl-scopes label, #geoduels-lofi-player .gdl-toggle-label { display: flex; align-items: center; gap: 3px; margin: 0; }
-            #geoduels-lofi-player .gdl-toggle-row { margin: 6px 0 2px; }
-            #geoduels-lofi-player input[type=range] { width: 100%; accent-color: #65d4a6; }
-            #geoduels-lofi-player .gdl-note { margin: 6px 0 0; color: #9eb1bf; font-size: 9px; line-height: 1.3; }
-            #geoduels-lofi-player .gdl-shutdown-btn { width: 100%; margin-top: 8px; background: rgba(239, 68, 68, 0.2); border: 1px solid rgba(239, 68, 68, 0.4); color: #ff9999; font-size: 10px; padding: 5px; }
-            #geoduels-lofi-player .gdl-shutdown-btn:hover { background: rgba(239, 68, 68, 0.4); color: #fff; }
+            #geoduels-lofi-player * {
+                box-sizing: border-box;
+            }
+            #geoduels-lofi-player[hidden] {
+                display: none !important;
+            }
+
+            /* Floating Control Pill */
+            #geoduels-lofi-player .gdl-bar {
+                display: flex;
+                align-items: center;
+                gap: 5px;
+                padding: 4px 6px;
+                background: rgba(13, 20, 30, 0.82);
+                backdrop-filter: blur(16px);
+                -webkit-backdrop-filter: blur(16px);
+                border: 1px solid rgba(255, 255, 255, 0.1);
+                border-radius: 999px;
+                box-shadow: 0 8px 24px rgba(0, 0, 0, 0.45), 0 0 0 1px rgba(0,0,0,0.2);
+                cursor: grab;
+                transition: border-color 0.2s, box-shadow 0.2s;
+            }
+            #geoduels-lofi-player .gdl-bar:active {
+                cursor: grabbing;
+            }
+            #geoduels-lofi-player .gdl-bar:hover {
+                border-color: rgba(52, 211, 153, 0.35);
+                box-shadow: 0 8px 28px rgba(0, 0, 0, 0.55), 0 0 12px rgba(52, 211, 153, 0.12);
+            }
+
+            /* Buttons */
+            #geoduels-lofi-player .gdl-btn {
+                display: inline-flex;
+                align-items: center;
+                justify-content: center;
+                width: 28px;
+                height: 28px;
+                border: none;
+                outline: none;
+                border-radius: 50%;
+                background: rgba(255, 255, 255, 0.06);
+                color: #94a3b8;
+                cursor: pointer;
+                transition: all 0.18s ease;
+                padding: 0;
+            }
+            #geoduels-lofi-player .gdl-btn:hover {
+                background: rgba(255, 255, 255, 0.14);
+                color: #fff;
+                transform: scale(1.05);
+            }
+            #geoduels-lofi-player .gdl-btn:active {
+                transform: scale(0.95);
+            }
+
+            /* Play / Pause Button */
+            #geoduels-lofi-player .gdl-play {
+                width: 32px;
+                height: 32px;
+                background: #10b981;
+                color: #fff;
+                box-shadow: 0 2px 8px rgba(16, 185, 129, 0.35);
+            }
+            #geoduels-lofi-player .gdl-play:hover {
+                background: #059669;
+                color: #fff;
+                box-shadow: 0 3px 12px rgba(16, 185, 129, 0.5);
+                transform: scale(1.06);
+            }
+            #geoduels-lofi-player .gdl-play .gdl-icon-pause {
+                display: none;
+            }
+            #geoduels-lofi-player .gdl-play.is-playing {
+                background: #059669;
+            }
+            #geoduels-lofi-player .gdl-play.is-playing .gdl-icon-play {
+                display: none;
+            }
+            #geoduels-lofi-player .gdl-play.is-playing .gdl-icon-pause {
+                display: flex;
+                gap: 2.5px;
+                align-items: center;
+                justify-content: center;
+            }
+            #geoduels-lofi-player .gdl-play.is-playing .gdl-icon-pause i {
+                display: block;
+                width: 3px;
+                height: 11px;
+                background: #fff;
+                border-radius: 1px;
+            }
+
+            #geoduels-lofi-player .gdl-settings.is-active {
+                background: rgba(52, 211, 153, 0.2);
+                color: #34d399;
+            }
+
+            /* Settings Popover Panel */
+            #geoduels-lofi-player .gdl-panel {
+                position: absolute;
+                top: 44px;
+                right: 0;
+                width: 220px;
+                padding: 12px;
+                background: rgba(13, 20, 30, 0.92);
+                backdrop-filter: blur(18px);
+                -webkit-backdrop-filter: blur(18px);
+                border: 1px solid rgba(255, 255, 255, 0.12);
+                border-radius: 14px;
+                box-shadow: 0 16px 36px rgba(0, 0, 0, 0.6), 0 0 0 1px rgba(0,0,0,0.25);
+                opacity: 0;
+                transform: translateY(-8px) scale(0.96);
+                pointer-events: none;
+                transition: opacity 0.2s cubic-bezier(0.16, 1, 0.3, 1), transform 0.2s cubic-bezier(0.16, 1, 0.3, 1);
+            }
+            #geoduels-lofi-player .gdl-panel.is-open {
+                opacity: 1;
+                transform: translateY(0) scale(1);
+                pointer-events: auto;
+            }
+
+            /* Panel Elements */
+            #geoduels-lofi-player .gdl-label {
+                display: block;
+                margin: 8px 0 4px;
+                color: #94a3b8;
+                font-size: 10px;
+                font-weight: 600;
+                text-transform: uppercase;
+                letter-spacing: 0.6px;
+            }
+            #geoduels-lofi-player .gdl-label:first-child {
+                margin-top: 0;
+            }
+
+            #geoduels-lofi-player select {
+                width: 100%;
+                background: rgba(255, 255, 255, 0.07);
+                color: #f1f5f9;
+                border: 1px solid rgba(255, 255, 255, 0.12);
+                border-radius: 8px;
+                padding: 6px 8px;
+                font-size: 11px;
+                outline: none;
+                cursor: pointer;
+                transition: border-color 0.15s;
+            }
+            #geoduels-lofi-player select:hover, #geoduels-lofi-player select:focus {
+                border-color: #34d399;
+            }
+            #geoduels-lofi-player select option {
+                background: #0f172a;
+                color: #f1f5f9;
+            }
+
+            /* Scope Pills - 2x2 Grid Layout */
+            #geoduels-lofi-player .gdl-scopes {
+                display: grid;
+                grid-template-columns: repeat(2, 1fr);
+                gap: 5px;
+            }
+            #geoduels-lofi-player .gdl-chip {
+                position: relative;
+                cursor: pointer;
+            }
+            #geoduels-lofi-player .gdl-chip input {
+                position: absolute;
+                opacity: 0;
+                pointer-events: none;
+            }
+            #geoduels-lofi-player .gdl-chip span {
+                display: block;
+                text-align: center;
+                padding: 5.5px 0;
+                font-size: 10.5px;
+                font-weight: 500;
+                color: #94a3b8;
+                background: rgba(255, 255, 255, 0.05);
+                border: 1px solid rgba(255, 255, 255, 0.08);
+                border-radius: 6px;
+                transition: all 0.15s ease;
+            }
+            #geoduels-lofi-player .gdl-chip input:checked + span {
+                background: rgba(16, 185, 129, 0.2);
+                border-color: rgba(52, 211, 153, 0.45);
+                color: #34d399;
+                font-weight: 600;
+            }
+            #geoduels-lofi-player .gdl-chip:hover span {
+                background: rgba(255, 255, 255, 0.1);
+                color: #fff;
+            }
+
+            /* Slider Toggle Switches */
+            #geoduels-lofi-player .gdl-toggle-row {
+                display: flex;
+                align-items: center;
+                justify-content: space-between;
+                margin: 9px 0 6px;
+            }
+            #geoduels-lofi-player .gdl-toggle-label {
+                font-size: 11px;
+                color: #cbd5e1;
+                font-weight: 500;
+                cursor: pointer;
+            }
+            #geoduels-lofi-player .gdl-switch {
+                position: relative;
+                width: 32px;
+                height: 18px;
+                display: inline-block;
+                margin: 0;
+            }
+            #geoduels-lofi-player .gdl-switch input {
+                opacity: 0;
+                width: 0;
+                height: 0;
+                position: absolute;
+            }
+            #geoduels-lofi-player .gdl-slider {
+                position: absolute;
+                cursor: pointer;
+                top: 0; left: 0; right: 0; bottom: 0;
+                background-color: rgba(255, 255, 255, 0.15);
+                transition: .2s cubic-bezier(0.4, 0, 0.2, 1);
+                border-radius: 20px;
+            }
+            #geoduels-lofi-player .gdl-slider:before {
+                position: absolute;
+                content: "";
+                height: 12px;
+                width: 12px;
+                left: 3px;
+                bottom: 3px;
+                background-color: #fff;
+                transition: .2s cubic-bezier(0.4, 0, 0.2, 1);
+                border-radius: 50%;
+            }
+            #geoduels-lofi-player .gdl-switch input:checked + .gdl-slider {
+                background-color: #10b981;
+            }
+            #geoduels-lofi-player .gdl-switch input:checked + .gdl-slider:before {
+                transform: translateX(14px);
+            }
+
+            /* Volume Range */
+            #geoduels-lofi-player .gdl-vol-wrap {
+                display: flex;
+                align-items: center;
+                gap: 8px;
+                margin-top: 2px;
+            }
+            #geoduels-lofi-player .gdl-vol-icon {
+                color: #94a3b8;
+                font-size: 10px;
+            }
+            #geoduels-lofi-player input[type=range] {
+                -webkit-appearance: none;
+                appearance: none;
+                width: 100%;
+                height: 4px;
+                border-radius: 2px;
+                background: rgba(255, 255, 255, 0.15);
+                outline: none;
+                cursor: pointer;
+            }
+            #geoduels-lofi-player input[type=range]::-webkit-slider-thumb {
+                -webkit-appearance: none;
+                appearance: none;
+                width: 13px;
+                height: 13px;
+                border-radius: 50%;
+                background: #34d399;
+                box-shadow: 0 0 6px rgba(52, 211, 153, 0.6);
+                cursor: pointer;
+                transition: transform 0.1s;
+            }
+            #geoduels-lofi-player input[type=range]::-webkit-slider-thumb:hover {
+                transform: scale(1.2);
+            }
+
+            /* Shortcuts Cheat Sheet */
+            #geoduels-lofi-player .gdl-shortcuts {
+                margin: 10px 0 0;
+                padding: 6px 8px;
+                background: rgba(0, 0, 0, 0.25);
+                border-radius: 6px;
+                color: #94a3b8;
+                font-size: 9px;
+                line-height: 1.5;
+            }
+            #geoduels-lofi-player .gdl-kbd {
+                display: inline-block;
+                padding: 1px 3px;
+                font-size: 8.5px;
+                background: rgba(255, 255, 255, 0.1);
+                border-radius: 3px;
+                color: #e2e8f0;
+                font-family: inherit;
+            }
+
+            /* Shutdown Button */
+            #geoduels-lofi-player .gdl-shutdown-btn {
+                width: 100%;
+                margin-top: 10px;
+                background: rgba(239, 68, 68, 0.12);
+                border: 1px solid rgba(239, 68, 68, 0.3);
+                border-radius: 6px;
+                color: #fca5a5;
+                font-size: 10px;
+                font-weight: 600;
+                padding: 6px;
+                cursor: pointer;
+                transition: all 0.15s ease;
+            }
+            #geoduels-lofi-player .gdl-shutdown-btn:hover {
+                background: rgba(239, 68, 68, 0.25);
+                border-color: #ef4444;
+                color: #fff;
+            }
         </style>
-        <div class="gdl-card">
-            <div class="gdl-row">
-                <button class="gdl-play" type="button" aria-label="Play">
-                    <span class="gdl-play-icon">▶</span>
-                    <span class="gdl-pause-icon"><i></i><i></i></span>
-                </button>
-                <button class="gdl-settings" type="button" title="Settings" aria-label="Settings">⚙</button>
-                <button class="gdl-minimize" type="button" title="Hide UI (Alt + H)" aria-label="Hide UI">–</button>
+        <div class="gdl-bar">
+            <button class="gdl-btn gdl-play is-playing" type="button" aria-label="Play">
+                <svg class="gdl-icon-play" viewBox="0 0 24 24" width="13" height="13" fill="currentColor"><path d="M8 5v14l11-7z"></path></svg>
+                <span class="gdl-icon-pause"><i></i><i></i></span>
+            </button>
+            <button class="gdl-btn gdl-settings" type="button" title="Settings" aria-label="Settings">
+                <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="3"></circle><path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 0 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 0 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 0 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 0 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z"></path></svg>
+            </button>
+            <button class="gdl-btn gdl-minimize" type="button" title="Hide UI (Alt + H)" aria-label="Hide UI">
+                <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round"><line x1="5" y1="12" x2="19" y2="12"></line></svg>
+            </button>
+        </div>
+        <div class="gdl-panel">
+            <label class="gdl-label">Radio Station</label>
+            <select class="gdl-station-select">
+                ${optionsHtml}
+            </select>
+
+            <label class="gdl-label">Play Music In</label>
+            <div class="gdl-scopes">
+                <label class="gdl-chip"><input data-scope="lobby" type="checkbox"><span>Lobby</span></label>
+                <label class="gdl-chip"><input data-scope="single" type="checkbox"><span>Solo</span></label>
+                <label class="gdl-chip"><input data-scope="rankduel" type="checkbox"><span>Ranked</span></label>
+                <label class="gdl-chip"><input data-scope="partyduel" type="checkbox"><span>Party</span></label>
             </div>
-            <div class="gdl-panel" hidden>
-                <label>Station</label>
-                <select class="gdl-station-select">
-                    ${optionsHtml}
-                </select>
-                <label>Play in</label>
-                <div class="gdl-scopes">
-                    <label><input data-scope="lobby" type="checkbox">Lobby</label>
-                    <label><input data-scope="single" type="checkbox">Solo</label>
-                    <label><input data-scope="duel" type="checkbox">Duel</label>
-                </div>
-                <div class="gdl-toggle-row">
-                    <label class="gdl-toggle-label"><input class="gdl-autoplay" type="checkbox">Autoplay</label>
-                </div>
-                <label>Volume</label>
+
+            <div class="gdl-toggle-row">
+                <label class="gdl-toggle-label" for="gdl-autoplay-cb">Autoplay on Load</label>
+                <label class="gdl-switch">
+                    <input id="gdl-autoplay-cb" class="gdl-autoplay" type="checkbox">
+                    <span class="gdl-slider"></span>
+                </label>
+            </div>
+
+            <label class="gdl-label">Volume</label>
+            <div class="gdl-vol-wrap">
+                <svg viewBox="0 0 24 24" width="13" height="13" fill="currentColor" style="color:#94a3b8;flex-shrink:0;"><path d="M3 9v6h4l5 5V4L7 9H3zm13.5 3c0-1.77-1.02-3.29-2.5-4.03v8.05c1.48-.73 2.5-2.25 2.5-4.02z"></path></svg>
                 <input class="gdl-volume" type="range" min="0" max="100" aria-label="Volume">
-                <p class="gdl-note">Alt+H: UI | Alt+P: Play<br>Alt+N: Station | Alt+[/]: Vol</p>
-                <button class="gdl-shutdown-btn" type="button">Shutdown App</button>
             </div>
+
+            <div class="gdl-shortcuts">
+                <span class="gdl-kbd">Alt</span>+<span class="gdl-kbd">P</span> Play/Pause • <span class="gdl-kbd">Alt</span>+<span class="gdl-kbd">N</span> Station<br>
+                <span class="gdl-kbd">Alt</span>+<span class="gdl-kbd">H</span> Hide UI • <span class="gdl-kbd">Alt</span>+<span class="gdl-kbd">[</span>/<span class="gdl-kbd">]</span> Vol
+            </div>
+
+            <button class="gdl-shutdown-btn" type="button">Shutdown App</button>
         </div>`;
         
         document.body.append(root);
         
         playButton = root.querySelector(".gdl-play");
+        settingsButton = root.querySelector(".gdl-settings");
+        minimizeButton = root.querySelector(".gdl-minimize");
         panel = root.querySelector(".gdl-panel");
-        volume = root.querySelector(".gdl-volume");
+        volumeSlider = root.querySelector(".gdl-volume");
         autoplayInput = root.querySelector(".gdl-autoplay");
         streamSelect = root.querySelector(".gdl-station-select");
 
@@ -332,10 +696,8 @@
             setStation(Number(streamSelect.value));
         });
 
-        root.addEventListener("dragstart", (e) => e.preventDefault());
-
         root.querySelectorAll("[data-scope]").forEach((box) => {
-            box.checked = settings.scopes[box.dataset.scope];
+            box.checked = !!settings.scopes[box.dataset.scope];
             box.addEventListener("change", () => {
                 settings.scopes[box.dataset.scope] = box.checked;
                 save();
@@ -353,68 +715,77 @@
 
         playButton.addEventListener("click", () => void (audio.paused ? play() : pause()));
         
-        root.querySelector(".gdl-settings").addEventListener("click", () => {
-            expanded = !expanded;
-            updateContext();
+        settingsButton.addEventListener("click", (e) => {
+            e.stopPropagation();
+            togglePanel();
         });
 
-        root.querySelector(".gdl-minimize").addEventListener("click", () => {
+        document.addEventListener("pointerdown", (e) => {
+            if (expanded && root && !root.contains(e.target)) {
+                togglePanel(false);
+            }
+        });
+
+        minimizeButton.addEventListener("click", () => {
             settings.uiHidden = true;
+            togglePanel(false);
             save();
             updateContext();
             showToast("UI Hidden. Press Alt + H to restore.");
         });
 
         root.querySelector(".gdl-shutdown-btn").addEventListener("click", () => {
-            const confirmed = window.confirm("Are you sure you want to completely shut down the music player?\n\nAudio will stop completely. To turn it back on later, press:\nAlt + Shift + M");
+            const confirmed = window.confirm("Are you sure you want to shut down the music player?\n\nAudio will stop. To restart later, press: Alt + Shift + M");
             if (confirmed) {
                 shutdown();
             }
         });
 
-        volume.addEventListener("input", () => {
-            audio.volume = Number(volume.value) / 100;
+        volumeSlider.addEventListener("input", () => {
+            audio.volume = Number(volumeSlider.value) / 100;
             settings.volume = audio.volume;
-            save(); emit();
+            save();
+            emit();
         });
 
         if (settings.position && Number.isFinite(settings.position.x) && Number.isFinite(settings.position.y) &&
             settings.position.x >= 0 && settings.position.y >= 0 && 
-            settings.position.x < innerWidth - 20 && settings.position.y < innerHeight - 20) {
+            settings.position.x < innerWidth - 40 && settings.position.y < innerHeight - 40) {
             root.style.left = `${settings.position.x}px`;
             root.style.top = `${settings.position.y}px`;
             root.style.right = "auto";
         }
 
         let drag = null;
-        root.addEventListener("pointerdown", (event) => {
-            if (['BUTTON', 'INPUT', 'SELECT', 'OPTION', 'LABEL', 'I', 'SPAN'].includes(event.target.tagName)) return;
-            drag = { x: event.clientX, y: event.clientY, left: root.offsetLeft, top: root.offsetTop, moved: false };
-            root.setPointerCapture(event.pointerId);
+        const bar = root.querySelector(".gdl-bar");
+
+        bar.addEventListener("pointerdown", (event) => {
+            if (event.target.closest("button")) return;
+            drag = { x: event.clientX, y: event.clientY, left: root.offsetLeft, top: root.offsetTop };
+            bar.setPointerCapture(event.pointerId);
         });
 
-        root.addEventListener("pointermove", (event) => {
+        bar.addEventListener("pointermove", (event) => {
             if (!drag) return;
-            const x = Math.max(0, Math.min(innerWidth - root.offsetWidth, drag.left + event.clientX - drag.x));
-            const y = Math.max(0, Math.min(innerHeight - root.offsetHeight, drag.top + event.clientY - drag.y));
-            if (Math.abs(event.clientX - drag.x) > 4 || Math.abs(event.clientY - drag.y) > 4) drag.moved = true;
+            const x = Math.max(10, Math.min(innerWidth - root.offsetWidth - 10, drag.left + event.clientX - drag.x));
+            const y = Math.max(10, Math.min(innerHeight - root.offsetHeight - 10, drag.top + event.clientY - drag.y));
             root.style.left = `${x}px`;
             root.style.top = `${y}px`;
             root.style.right = "auto";
         });
 
         const stopDrag = (event) => {
-            if (root.hasPointerCapture(event.pointerId)) {
-                root.releasePointerCapture(event.pointerId);
-            }
             if (!drag) return;
+            if (bar.hasPointerCapture(event.pointerId)) {
+                bar.releasePointerCapture(event.pointerId);
+            }
             settings.position = { x: root.offsetLeft, y: root.offsetTop };
             save();
             drag = null;
         };
 
-        root.addEventListener("pointerup", stopDrag);
-        root.addEventListener("pointercancel", stopDrag);
+        bar.addEventListener("pointerup", stopDrag);
+        bar.addEventListener("pointercancel", stopDrag);
 
         render();
         
@@ -442,6 +813,7 @@
         if (event.altKey && !event.ctrlKey && !event.shiftKey && (event.key === 'h' || event.key === 'H')) {
             event.preventDefault();
             settings.uiHidden = !settings.uiHidden;
+            if (settings.uiHidden) togglePanel(false);
             save();
             updateContext();
             showToast(settings.uiHidden ? "UI Hidden (Alt + H to restore)" : "UI Restored");
