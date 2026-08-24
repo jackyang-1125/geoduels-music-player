@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         GeoDuels Lofi / Chill Player
 // @namespace    https://geoduels.io/
-// @version      2.0.5
-// @description  Minimal Lofi / Chill player for the GeoDuels lobby and games with hotkey toggle (Alt + M).
+// @version      2.2.1
+// @description  Minimal Lofi / Chill player for GeoDuels. Fixes audio delay/buffer issues.
 // @match        https://geoduels.io/*
 // @match        https://*.geoduels.io/*
 // @noframes
@@ -16,11 +16,12 @@
     if (window.top !== window.self) return;
 
     const KEY = "geoduels-lofi-player:v2";
-    const STREAM_URL = "https://stream.nightride.fm/chillsynth.mp3";
-
+    const STREAM_URL = "https://stream.nightride.fm/chillsynth.mp3"; 
+    
     const defaults = {
         volume: 0.55,
         autoplay: true,
+        disabled: false,
         scopes: { lobby: true, single: false, duel: false },
         position: null
     };
@@ -33,15 +34,17 @@
     const settings = {
         volume: Number.isFinite(saved.volume) ? saved.volume : defaults.volume,
         autoplay: typeof saved.autoplay === "boolean" ? saved.autoplay : defaults.autoplay,
+        disabled: typeof saved.disabled === "boolean" ? saved.disabled : defaults.disabled,
         scopes: { ...defaults.scopes, ...(saved.scopes || {}) },
         position: saved.position || null
     };
 
-    const audio = new Audio(STREAM_URL);
-    audio.preload = "none";
+    const audio = new Audio();
+    audio.preload = "none"; // 關閉預載，避免瀏覽器囤積舊的廣播緩衝導致延遲
     audio.volume = Math.max(0, Math.min(1, settings.volume));
 
     let root, playButton, panel, volume, autoplayInput, expanded = false, lastContext = "";
+    let pendingAutoplay = false;
 
     function save() {
         localStorage.setItem(KEY, JSON.stringify(settings));
@@ -89,14 +92,21 @@
 
     function updateContext() {
         if (!root) return;
+        if (settings.disabled) {
+            root.hidden = true;
+            panel.hidden = true;
+            pause();
+            return;
+        }
+
         const place = context();
         root.hidden = !settings.scopes[place];
         panel.hidden = !expanded;
-
+        
         if (place !== lastContext) {
             lastContext = place;
             if (settings.scopes[place]) {
-                if (settings.autoplay || !audio.paused) void play();
+                if (settings.autoplay || !audio.paused) void tryAutoplay();
             } else {
                 pause();
             }
@@ -112,15 +122,81 @@
     }
 
     function play() {
+        if (settings.disabled) return Promise.resolve(false);
+        
+        // 確保是連線到最新的即時串流，清除舊緩衝避免播放延遲
+        if (audio.paused || !audio.src) {
+            audio.src = STREAM_URL;
+            audio.load();
+        }
+        
         return audio.play().then(() => {
-            render(); emit(); return true;
+            pendingAutoplay = false;
+            render();
+            emit();
+            return true;
         }).catch(() => {
-            render(); return false;
+            render();
+            return false;
+        });
+    }
+
+    function tryAutoplay() {
+        if (settings.disabled || !settings.autoplay) return Promise.resolve(false);
+        
+        if (audio.paused || !audio.src) {
+            audio.src = STREAM_URL;
+            audio.load();
+        }
+        
+        return audio.play().then(() => {
+            pendingAutoplay = false;
+            render();
+            emit();
+            return true;
+        }).catch(() => {
+            pendingAutoplay = true;
+            const unlock = () => {
+                if (pendingAutoplay && audio.paused && settings.autoplay && !settings.disabled && settings.scopes[context()]) {
+                    play(); // 當使用者第一次互動時觸發播放
+                }
+                window.removeEventListener("pointerdown", unlock);
+                window.removeEventListener("keydown", unlock);
+            };
+            // 監聽第一次點擊或鍵盤按鍵來解除瀏覽器限制
+            window.addEventListener("pointerdown", unlock, { once: true });
+            window.addEventListener("keydown", unlock, { once: true });
+            return false;
         });
     }
 
     function pause() {
-        audio.pause(); render(); emit();
+        audio.pause();
+        pendingAutoplay = false;
+        render();
+        emit();
+    }
+
+    function shutdown() {
+        settings.disabled = true;
+        pause();
+        audio.removeAttribute("src"); // 徹底中斷連線
+        audio.load();
+        expanded = false;
+        save();
+        updateContext();
+        showToast("Player completely shut down. Press Alt + Shift + M to restart.");
+    }
+
+    function revive() {
+        settings.disabled = false;
+        save();
+        updateContext();
+        render();
+        if (settings.autoplay) {
+            tryAutoplay();
+        }
+        showToast("Player restarted.");
     }
 
     function emit() {
@@ -137,9 +213,9 @@
             #geoduels-lofi-player {
                 position: fixed;
                 z-index: 2147483647;
-                top: 12px;
-                right: 12px;
-                width: 82px;
+                top: 18px;
+                right: 190px;
+                width: 108px;
                 color: #fff;
                 font: 12px/1 system-ui, sans-serif;
                 touch-action: none;
@@ -149,22 +225,26 @@
             }
             #geoduels-lofi-player[hidden] { display: none !important; }
             #geoduels-lofi-player .gdl-card { border: 1px solid #65d4a6; border-radius: 9px; background: #0b121ded; box-shadow: 0 4px 18px #0008; backdrop-filter: blur(4px); }
-            #geoduels-lofi-player .gdl-row { display: flex; gap: 5px; padding: 6px; }
-            #geoduels-lofi-player button { border: 0; border-radius: 5px; padding: 7px 9px; color: #fff; background: #ffffff18; cursor: pointer; font: inherit; font-weight: 700; }
+            #geoduels-lofi-player .gdl-row { display: flex; gap: 4px; padding: 6px; }
+            #geoduels-lofi-player button { border: 0; border-radius: 5px; padding: 7px 8px; color: #fff; background: #ffffff18; cursor: pointer; font: inherit; font-weight: 700; transition: background 0.15s, color 0.15s; }
             #geoduels-lofi-player button:hover { background: #ffffff33; }
-            #geoduels-lofi-player .gdl-play { display: grid; width: 32px; place-items: center; background: #168f63; }
+            #geoduels-lofi-player .gdl-play { display: grid; width: 30px; place-items: center; background: #168f63; }
             .gdl-play-icon { font-size: 12px; }
             .gdl-pause-icon { display: none; gap: 3px; }
             .gdl-pause-icon i { display: block; width: 3px; height: 12px; border-radius: 1px; background: #fff; }
             #geoduels-lofi-player .gdl-play.is-playing .gdl-play-icon { display: none; }
             #geoduels-lofi-player .gdl-play.is-playing .gdl-pause-icon { display: flex; }
-            #geoduels-lofi-player .gdl-panel { position: absolute; top: 43px; right: 0; width: 148px; padding: 7px; border: 1px solid #65d4a6; border-radius: 8px; background: #0b121df7; box-shadow: 0 4px 18px #0008; }
+            #geoduels-lofi-player .gdl-minimize { color: #a0aec0; }
+            #geoduels-lofi-player .gdl-minimize:hover { background: rgba(255, 255, 255, 0.25); color: #fff; }
+            #geoduels-lofi-player .gdl-panel { position: absolute; top: 43px; right: 0; width: 154px; padding: 7px; border: 1px solid #65d4a6; border-radius: 8px; background: #0b121df7; box-shadow: 0 4px 18px #0008; }
             #geoduels-lofi-player label { display: block; margin: 6px 0 3px; color: #c7d4df; font-size: 10px; }
             #geoduels-lofi-player .gdl-scopes { display: flex; gap: 5px; }
             #geoduels-lofi-player .gdl-scopes label, #geoduels-lofi-player .gdl-toggle-label { display: flex; align-items: center; gap: 3px; margin: 0; }
             #geoduels-lofi-player .gdl-toggle-row { margin: 6px 0 2px; }
             #geoduels-lofi-player input[type=range] { width: 100%; accent-color: #65d4a6; }
-            #geoduels-lofi-player .gdl-note { margin: 6px 0 0; color: #9eb1bf; font-size: 9px; line-height: 1.2; }
+            #geoduels-lofi-player .gdl-note { margin: 6px 0 0; color: #9eb1bf; font-size: 9px; line-height: 1.3; }
+            #geoduels-lofi-player .gdl-shutdown-btn { width: 100%; margin-top: 8px; background: rgba(239, 68, 68, 0.2); border: 1px solid rgba(239, 68, 68, 0.4); color: #ff9999; font-size: 10px; padding: 5px; }
+            #geoduels-lofi-player .gdl-shutdown-btn:hover { background: rgba(239, 68, 68, 0.4); color: #fff; }
         </style>
         <div class="gdl-card">
             <div class="gdl-row">
@@ -172,7 +252,8 @@
                     <span class="gdl-play-icon">▶</span>
                     <span class="gdl-pause-icon"><i></i><i></i></span>
                 </button>
-                <button class="gdl-settings" type="button" aria-label="Settings">⚙</button>
+                <button class="gdl-settings" type="button" title="Settings" aria-label="Settings">⚙</button>
+                <button class="gdl-minimize" type="button" title="Minimize UI (Alt + H)" aria-label="Minimize">–</button>
             </div>
             <div class="gdl-panel" hidden>
                 <label>Play in</label>
@@ -186,12 +267,13 @@
                 </div>
                 <label>Volume</label>
                 <input class="gdl-volume" type="range" min="0" max="100" aria-label="Volume">
-                <p class="gdl-note">Instrumental Chillsynth stream</p>
+                <p class="gdl-note">Alt+H: Min/Show | Alt+P: Play<br>Alt+↑/↓: Vol | Alt+Shift+M: App</p>
+                <button class="gdl-shutdown-btn" type="button">Shutdown App</button>
             </div>
         </div>`;
-
+        
         document.body.append(root);
-
+        
         playButton = root.querySelector(".gdl-play");
         panel = root.querySelector(".gdl-panel");
         volume = root.querySelector(".gdl-volume");
@@ -205,9 +287,6 @@
                 settings.scopes[box.dataset.scope] = box.checked;
                 save();
                 updateContext();
-                if (box.dataset.scope === "lobby" && !box.checked) {
-                    showToast("Player hidden in Lobby. Press Alt + M to reopen.");
-                }
             });
         });
 
@@ -218,9 +297,27 @@
         });
 
         playButton.addEventListener("click", () => void (audio.paused ? play() : pause()));
+        
         root.querySelector(".gdl-settings").addEventListener("click", () => {
             expanded = !expanded;
             updateContext();
+        });
+
+        root.querySelector(".gdl-minimize").addEventListener("click", () => {
+            const place = context();
+            settings.scopes[place] = false;
+            save();
+            updateContext();
+            const targetBox = root?.querySelector(`[data-scope="${place}"]`);
+            if (targetBox) targetBox.checked = false;
+            showToast("UI Minimized. Press Alt + H to restore.");
+        });
+
+        root.querySelector(".gdl-shutdown-btn").addEventListener("click", () => {
+            const confirmed = window.confirm("Are you sure you want to completely shut down the music player?\n\nAudio will stop completely. To turn it back on later, press:\nAlt + Shift + M");
+            if (confirmed) {
+                shutdown();
+            }
         });
 
         volume.addEventListener("input", () => {
@@ -230,7 +327,7 @@
         });
 
         if (settings.position && Number.isFinite(settings.position.x) && Number.isFinite(settings.position.y) &&
-            settings.position.x >= 0 && settings.position.y >= 0 &&
+            settings.position.x >= 0 && settings.position.y >= 0 && 
             settings.position.x < innerWidth - 20 && settings.position.y < innerHeight - 20) {
             root.style.left = `${settings.position.x}px`;
             root.style.top = `${settings.position.y}px`;
@@ -239,7 +336,7 @@
 
         let drag = null;
         root.addEventListener("pointerdown", (event) => {
-            if (['BUTTON', 'INPUT', 'LABEL', 'I'].includes(event.target.tagName)) return;
+            if (['BUTTON', 'INPUT', 'LABEL', 'I', 'SPAN'].includes(event.target.tagName)) return;
             drag = { x: event.clientX, y: event.clientY, left: root.offsetLeft, top: root.offsetTop, moved: false };
             root.setPointerCapture(event.pointerId);
         });
@@ -268,18 +365,31 @@
         root.addEventListener("pointercancel", stopDrag);
 
         render();
-
+        
         new MutationObserver(updateContext).observe(document.documentElement, { childList: true, subtree: true });
         addEventListener("popstate", updateContext);
-
-        if (settings.autoplay) {
-            void play();
+        
+        if (settings.autoplay && !settings.disabled) {
+            void tryAutoplay();
         }
     }
 
     window.addEventListener("keydown", (event) => {
         if (['INPUT', 'TEXTAREA'].includes(event.target.tagName) || event.target.isContentEditable) return;
-        if (event.altKey && (event.key === 'm' || event.key === 'M')) {
+
+        if (event.altKey && event.shiftKey && (event.key === 'm' || event.key === 'M')) {
+            event.preventDefault();
+            if (settings.disabled) {
+                revive();
+            } else {
+                shutdown();
+            }
+            return;
+        }
+
+        if (settings.disabled) return;
+
+        if (event.altKey && !event.ctrlKey && !event.shiftKey && (event.key === 'h' || event.key === 'H')) {
             event.preventDefault();
             const place = context();
             const willShow = !settings.scopes[place];
@@ -288,15 +398,37 @@
             updateContext();
             const targetBox = root?.querySelector(`[data-scope="${place}"]`);
             if (targetBox) targetBox.checked = willShow;
-            showToast(willShow ? `Music Player enabled (${place})` : `Music Player hidden (Alt + M to reopen)`);
+            showToast(willShow ? `UI Restored (${place})` : `UI Minimized (Alt + H to restore)`);
+            return;
+        }
+
+        if (event.altKey && !event.ctrlKey && !event.shiftKey && (event.key === 'p' || event.key === 'P')) {
+            event.preventDefault();
+            void (audio.paused ? play() : pause());
+            showToast(audio.paused ? "Paused" : "Playing");
+            return;
+        }
+
+        if (event.altKey && !event.ctrlKey && !event.shiftKey && event.key === 'ArrowUp') {
+            event.preventDefault();
+            api.setVolume(audio.volume + 0.05);
+            showToast(`Volume: ${Math.round(audio.volume * 100)}%`);
+            return;
+        }
+
+        if (event.altKey && !event.ctrlKey && !event.shiftKey && event.key === 'ArrowDown') {
+            event.preventDefault();
+            api.setVolume(audio.volume - 0.05);
+            showToast(`Volume: ${Math.round(audio.volume * 100)}%`);
+            return;
         }
     });
 
     audio.addEventListener("play", () => { render(); emit(); });
     audio.addEventListener("pause", () => { render(); emit(); });
-
+    
     const api = {
-        play, pause,
+        play, pause, shutdown, revive,
         toggle: () => audio.paused ? play() : (pause(), Promise.resolve(true)),
         setVolume(value) {
             audio.volume = Math.max(0, Math.min(1, Number(value)));
@@ -304,12 +436,12 @@
             save(); render(); emit();
         },
         getState() {
-            return { playing: !audio.paused, volume: audio.volume, context: context(), stream: "Lofi / Chill" };
+            return { playing: !audio.paused, volume: audio.volume, context: context(), disabled: settings.disabled, stream: "Lofi / Chill" };
         }
     };
-
+    
     window.GeoDuelsMusic = api;
-
+    
     if (document.body) mount();
     else addEventListener("DOMContentLoaded", mount, { once: true });
 })();
