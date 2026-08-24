@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         GeoDuels Lofi / Chill Player
 // @namespace    https://geoduels.io/
-// @version      2.2.3
-// @description  Minimal Lofi / Chill player for GeoDuels.
+// @version      2.3.0
+// @description  Minimal music player for GeoDuels with multi-genre radio stations.
 // @match        https://geoduels.io/*
 // @match        https://*.geoduels.io/*
 // @noframes
@@ -16,13 +16,24 @@
     if (window.top !== window.self) return;
 
     const KEY = "geoduels-lofi-player:v2";
-    const STREAM_URL = "https://stream.nightride.fm/chillsynth.mp3"; 
     
+    const STREAMS = [
+        { name: "Chillsynth", url: "https://stream.nightride.fm/chillsynth.mp3" },
+        { name: "Groove Salad (Lofi / Chill)", url: "https://ice6.somafm.com/groovesalad-128-mp3" },
+        { name: "Synthwave", url: "https://stream.nightride.fm/nightride.mp3" },
+        { name: "Vaporwaves", url: "https://ice6.somafm.com/vaporwaves-128-mp3" },
+        { name: "Drone Zone (Ambient)", url: "https://ice6.somafm.com/dronezone-128-mp3" },
+        { name: "Secret Agent (Lounge)", url: "https://ice6.somafm.com/secretagent-128-mp3" },
+        { name: "Spacesynth", url: "https://stream.nightride.fm/spacesynth.mp3" },
+        { name: "DEF CON (Chill Beats)", url: "https://ice6.somafm.com/defcon-128-mp3" }
+    ];
+
     const defaults = {
         volume: 0.55,
         autoplay: true,
         disabled: false,
         uiHidden: false,
+        streamIndex: 0,
         scopes: { lobby: true, single: false, duel: false },
         position: null
     };
@@ -37,15 +48,20 @@
         autoplay: typeof saved.autoplay === "boolean" ? saved.autoplay : defaults.autoplay,
         disabled: typeof saved.disabled === "boolean" ? saved.disabled : defaults.disabled,
         uiHidden: typeof saved.uiHidden === "boolean" ? saved.uiHidden : defaults.uiHidden,
+        streamIndex: Number.isInteger(saved.streamIndex) && saved.streamIndex >= 0 && saved.streamIndex < STREAMS.length ? saved.streamIndex : defaults.streamIndex,
         scopes: { ...defaults.scopes, ...(saved.scopes || {}) },
         position: saved.position || null
     };
+
+    function currentStream() {
+        return STREAMS[settings.streamIndex] || STREAMS[0];
+    }
 
     const audio = new Audio();
     audio.preload = "none";
     audio.volume = Math.max(0, Math.min(1, settings.volume));
 
-    let root, playButton, panel, volume, autoplayInput, expanded = false, lastContext = "";
+    let root, playButton, panel, volume, autoplayInput, streamSelect, expanded = false, lastContext = "";
     let pendingAutoplay = false;
 
     function save() {
@@ -121,14 +137,15 @@
         playButton.classList.toggle("is-playing", !audio.paused);
         playButton.setAttribute("aria-label", audio.paused ? "Play" : "Pause");
         volume.value = String(Math.round(audio.volume * 100));
+        if (streamSelect) streamSelect.value = String(settings.streamIndex);
         updateContext();
     }
 
     function play() {
         if (settings.disabled) return Promise.resolve(false);
-        
-        if (audio.paused || !audio.src) {
-            audio.src = STREAM_URL;
+        const stream = currentStream();
+        if (audio.paused || audio.src !== stream.url) {
+            audio.src = stream.url;
             audio.load();
         }
         
@@ -145,9 +162,9 @@
 
     function tryAutoplay() {
         if (settings.disabled || !settings.autoplay) return Promise.resolve(false);
-        
-        if (audio.paused || !audio.src) {
-            audio.src = STREAM_URL;
+        const stream = currentStream();
+        if (audio.paused || audio.src !== stream.url) {
+            audio.src = stream.url;
             audio.load();
         }
         
@@ -176,6 +193,23 @@
         pendingAutoplay = false;
         render();
         emit();
+    }
+
+    function setStation(index) {
+        settings.streamIndex = ((Number(index) || 0) % STREAMS.length + STREAMS.length) % STREAMS.length;
+        save();
+        const stream = currentStream();
+        if (streamSelect) streamSelect.value = String(settings.streamIndex);
+        const wasPlaying = !audio.paused;
+        audio.src = stream.url;
+        audio.load();
+        if (wasPlaying) {
+            play();
+        } else {
+            render();
+            emit();
+        }
+        showToast(`Station: ${stream.name}`);
     }
 
     function shutdown() {
@@ -209,6 +243,9 @@
 
         root = document.createElement("section");
         root.id = "geoduels-lofi-player";
+
+        const optionsHtml = STREAMS.map((s, idx) => `<option value="${idx}">${s.name}</option>`).join("");
+
         root.innerHTML = `
         <style>
             #geoduels-lofi-player {
@@ -237,8 +274,9 @@
             #geoduels-lofi-player .gdl-play.is-playing .gdl-pause-icon { display: flex; }
             #geoduels-lofi-player .gdl-minimize { color: #a0aec0; }
             #geoduels-lofi-player .gdl-minimize:hover { background: rgba(255, 255, 255, 0.25); color: #fff; }
-            #geoduels-lofi-player .gdl-panel { position: absolute; top: 43px; right: 0; width: 154px; padding: 7px; border: 1px solid #65d4a6; border-radius: 8px; background: #0b121df7; box-shadow: 0 4px 18px #0008; }
+            #geoduels-lofi-player .gdl-panel { position: absolute; top: 43px; right: 0; width: 160px; padding: 7px; border: 1px solid #65d4a6; border-radius: 8px; background: #0b121df7; box-shadow: 0 4px 18px #0008; }
             #geoduels-lofi-player label { display: block; margin: 6px 0 3px; color: #c7d4df; font-size: 10px; }
+            #geoduels-lofi-player select { width: 100%; box-sizing: border-box; background: #152331; color: #fff; border: 1px solid #405669; border-radius: 4px; padding: 4px; font-size: 10px; outline: none; }
             #geoduels-lofi-player .gdl-scopes { display: flex; gap: 5px; }
             #geoduels-lofi-player .gdl-scopes label, #geoduels-lofi-player .gdl-toggle-label { display: flex; align-items: center; gap: 3px; margin: 0; }
             #geoduels-lofi-player .gdl-toggle-row { margin: 6px 0 2px; }
@@ -257,6 +295,10 @@
                 <button class="gdl-minimize" type="button" title="Hide UI (Alt + H)" aria-label="Hide UI">–</button>
             </div>
             <div class="gdl-panel" hidden>
+                <label>Station</label>
+                <select class="gdl-station-select">
+                    ${optionsHtml}
+                </select>
                 <label>Play in</label>
                 <div class="gdl-scopes">
                     <label><input data-scope="lobby" type="checkbox">Lobby</label>
@@ -268,7 +310,7 @@
                 </div>
                 <label>Volume</label>
                 <input class="gdl-volume" type="range" min="0" max="100" aria-label="Volume">
-                <p class="gdl-note">Alt+H: Hide/Show UI | Alt+P: Play<br>Alt+↑/↓: Vol | Alt+Shift+M: App</p>
+                <p class="gdl-note">Alt+H: UI | Alt+P: Play<br>Alt+N: Next Station | Alt+↑/↓: Vol</p>
                 <button class="gdl-shutdown-btn" type="button">Shutdown App</button>
             </div>
         </div>`;
@@ -279,6 +321,12 @@
         panel = root.querySelector(".gdl-panel");
         volume = root.querySelector(".gdl-volume");
         autoplayInput = root.querySelector(".gdl-autoplay");
+        streamSelect = root.querySelector(".gdl-station-select");
+
+        streamSelect.value = String(settings.streamIndex);
+        streamSelect.addEventListener("change", () => {
+            setStation(Number(streamSelect.value));
+        });
 
         root.addEventListener("dragstart", (e) => e.preventDefault());
 
@@ -334,7 +382,7 @@
 
         let drag = null;
         root.addEventListener("pointerdown", (event) => {
-            if (['BUTTON', 'INPUT', 'LABEL', 'I', 'SPAN'].includes(event.target.tagName)) return;
+            if (['BUTTON', 'INPUT', 'SELECT', 'OPTION', 'LABEL', 'I', 'SPAN'].includes(event.target.tagName)) return;
             drag = { x: event.clientX, y: event.clientY, left: root.offsetLeft, top: root.offsetTop, moved: false };
             root.setPointerCapture(event.pointerId);
         });
@@ -373,7 +421,7 @@
     }
 
     window.addEventListener("keydown", (event) => {
-        if (['INPUT', 'TEXTAREA'].includes(event.target.tagName) || event.target.isContentEditable) return;
+        if (['INPUT', 'TEXTAREA', 'SELECT'].includes(event.target.tagName) || event.target.isContentEditable) return;
 
         if (event.altKey && event.shiftKey && (event.key === 'm' || event.key === 'M')) {
             event.preventDefault();
@@ -393,6 +441,12 @@
             save();
             updateContext();
             showToast(settings.uiHidden ? "UI Hidden (Alt + H to restore)" : "UI Restored");
+            return;
+        }
+
+        if (event.altKey && !event.ctrlKey && !event.shiftKey && (event.key === 'n' || event.key === 'N')) {
+            event.preventDefault();
+            setStation(settings.streamIndex + 1);
             return;
         }
 
@@ -423,6 +477,9 @@
     
     const api = {
         play, pause, shutdown, revive,
+        nextStation: () => setStation(settings.streamIndex + 1),
+        previousStation: () => setStation(settings.streamIndex - 1),
+        setStation,
         toggle: () => audio.paused ? play() : (pause(), Promise.resolve(true)),
         setVolume(value) {
             audio.volume = Math.max(0, Math.min(1, Number(value)));
@@ -430,7 +487,7 @@
             save(); render(); emit();
         },
         getState() {
-            return { playing: !audio.paused, volume: audio.volume, context: context(), disabled: settings.disabled, stream: "Lofi / Chill" };
+            return { playing: !audio.paused, volume: audio.volume, context: context(), disabled: settings.disabled, station: currentStream().name };
         }
     };
     
