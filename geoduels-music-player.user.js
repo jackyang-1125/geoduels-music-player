@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GeoDuels Lofi / Chill Player
 // @namespace    https://geoduels.io/
-// @version      2.2.1
+// @version      2.2.2
 // @description  Minimal Lofi / Chill player for GeoDuels. Fixes audio delay/buffer issues.
 // @match        https://geoduels.io/*
 // @match        https://*.geoduels.io/*
@@ -100,17 +100,17 @@
         }
 
         const place = context();
-        root.hidden = !settings.scopes[place];
+        const isScopeActive = !!settings.scopes[place];
+        root.hidden = !isScopeActive;
         panel.hidden = !expanded;
         
-        if (place !== lastContext) {
-            lastContext = place;
-            if (settings.scopes[place]) {
-                if (settings.autoplay || !audio.paused) void tryAutoplay();
-            } else {
-                pause();
-            }
+        if (!isScopeActive) {
+            pause();
+        } else if (place !== lastContext) {
+            if (settings.autoplay || !audio.paused) void tryAutoplay();
         }
+
+        lastContext = place;
     }
 
     function render() {
