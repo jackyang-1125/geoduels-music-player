@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GeoDuels Lofi / Chill Player
 // @namespace    https://geoduels.io/
-// @version      2.3.0
+// @version      2.3.3
 // @description  Minimal music player for GeoDuels with multi-genre radio stations.
 // @match        https://geoduels.io/*
 // @match        https://*.geoduels.io/*
@@ -31,6 +31,7 @@
     const defaults = {
         volume: 0.55,
         autoplay: true,
+        userWantsPlaying: true,
         disabled: false,
         uiHidden: false,
         streamIndex: 0,
@@ -46,6 +47,7 @@
     const settings = {
         volume: Number.isFinite(saved.volume) ? saved.volume : defaults.volume,
         autoplay: typeof saved.autoplay === "boolean" ? saved.autoplay : defaults.autoplay,
+        userWantsPlaying: typeof saved.userWantsPlaying === "boolean" ? saved.userWantsPlaying : defaults.userWantsPlaying,
         disabled: typeof saved.disabled === "boolean" ? saved.disabled : defaults.disabled,
         uiHidden: typeof saved.uiHidden === "boolean" ? saved.uiHidden : defaults.uiHidden,
         streamIndex: Number.isInteger(saved.streamIndex) && saved.streamIndex >= 0 && saved.streamIndex < STREAMS.length ? saved.streamIndex : defaults.streamIndex,
@@ -61,7 +63,7 @@
     audio.preload = "none";
     audio.volume = Math.max(0, Math.min(1, settings.volume));
 
-    let root, playButton, panel, volume, autoplayInput, streamSelect, expanded = false, lastContext = "";
+    let root, playButton, panel, volume, autoplayInput, streamSelect, expanded = false;
     let pendingAutoplay = false;
 
     function save() {
@@ -103,9 +105,23 @@
     }
 
     function context() {
-        const inGame = /^\/match\//.test(location.pathname) ||
-            !!document.querySelector('iframe[src*="google.com/maps/embed"], [data-testid="minimap-panel"], [data-testid="timer-pill"]');
-        return !inGame ? "lobby" : document.querySelector('[data-testid="timer-pill"]') ? "duel" : "single";
+        const path = location.pathname;
+        if (/^\/(match|game|duel|single|play)(\/|$)/i.test(path)) {
+            if (/duel/i.test(path) || document.querySelector('[data-testid="timer-pill"]')) return "duel";
+            return "single";
+        }
+        const timerPill = document.querySelector('[data-testid="timer-pill"]');
+        const minimap = document.querySelector('[data-testid="minimap-panel"]');
+        if (timerPill && (timerPill.offsetWidth || timerPill.offsetHeight)) return "duel";
+        if (minimap && (minimap.offsetWidth || minimap.offsetHeight)) return "single";
+        return "lobby";
+    }
+
+    function suspendAudio() {
+        audio.pause();
+        pendingAutoplay = false;
+        render();
+        emit();
     }
 
     function updateContext() {
@@ -113,7 +129,7 @@
         if (settings.disabled) {
             root.hidden = true;
             panel.hidden = true;
-            pause();
+            suspendAudio();
             return;
         }
 
@@ -124,12 +140,16 @@
         panel.hidden = !expanded;
         
         if (!isScopeActive) {
-            pause();
-        } else if (place !== lastContext) {
-            if (settings.autoplay || !audio.paused) void tryAutoplay();
+            suspendAudio();
+        } else {
+            if (settings.userWantsPlaying) {
+                if (audio.paused && !pendingAutoplay) {
+                    play();
+                }
+            } else {
+                suspendAudio();
+            }
         }
-
-        lastContext = place;
     }
 
     function render() {
@@ -138,34 +158,15 @@
         playButton.setAttribute("aria-label", audio.paused ? "Play" : "Pause");
         volume.value = String(Math.round(audio.volume * 100));
         if (streamSelect) streamSelect.value = String(settings.streamIndex);
-        updateContext();
     }
 
     function play() {
         if (settings.disabled) return Promise.resolve(false);
+        settings.userWantsPlaying = true;
+        save();
         const stream = currentStream();
-        if (audio.paused || audio.src !== stream.url) {
+        if (audio.src !== stream.url) {
             audio.src = stream.url;
-            audio.load();
-        }
-        
-        return audio.play().then(() => {
-            pendingAutoplay = false;
-            render();
-            emit();
-            return true;
-        }).catch(() => {
-            render();
-            return false;
-        });
-    }
-
-    function tryAutoplay() {
-        if (settings.disabled || !settings.autoplay) return Promise.resolve(false);
-        const stream = currentStream();
-        if (audio.paused || audio.src !== stream.url) {
-            audio.src = stream.url;
-            audio.load();
         }
         
         return audio.play().then(() => {
@@ -176,7 +177,7 @@
         }).catch(() => {
             pendingAutoplay = true;
             const unlock = () => {
-                if (pendingAutoplay && audio.paused && settings.autoplay && !settings.disabled && settings.scopes[context()]) {
+                if (pendingAutoplay && audio.paused && settings.userWantsPlaying && !settings.disabled && settings.scopes[context()]) {
                     play();
                 }
                 window.removeEventListener("pointerdown", unlock);
@@ -184,11 +185,14 @@
             };
             window.addEventListener("pointerdown", unlock, { once: true });
             window.addEventListener("keydown", unlock, { once: true });
+            render();
             return false;
         });
     }
 
     function pause() {
+        settings.userWantsPlaying = false;
+        save();
         audio.pause();
         pendingAutoplay = false;
         render();
@@ -200,9 +204,8 @@
         save();
         const stream = currentStream();
         if (streamSelect) streamSelect.value = String(settings.streamIndex);
-        const wasPlaying = !audio.paused;
+        const wasPlaying = settings.userWantsPlaying;
         audio.src = stream.url;
-        audio.load();
         if (wasPlaying) {
             play();
         } else {
@@ -214,9 +217,9 @@
 
     function shutdown() {
         settings.disabled = true;
-        pause();
+        settings.userWantsPlaying = false;
+        audio.pause();
         audio.removeAttribute("src");
-        audio.load();
         expanded = false;
         save();
         updateContext();
@@ -225,11 +228,12 @@
 
     function revive() {
         settings.disabled = false;
+        settings.userWantsPlaying = settings.autoplay;
         save();
         updateContext();
         render();
-        if (settings.autoplay) {
-            tryAutoplay();
+        if (settings.userWantsPlaying) {
+            play();
         }
         showToast("Player restarted.");
     }
@@ -310,7 +314,7 @@
                 </div>
                 <label>Volume</label>
                 <input class="gdl-volume" type="range" min="0" max="100" aria-label="Volume">
-                <p class="gdl-note">Alt+H: UI | Alt+P: Play<br>Alt+N: Next Station | Alt+↑/↓: Vol</p>
+                <p class="gdl-note">Alt+H: UI | Alt+P: Play<br>Alt+N: Station | Alt+[/]: Vol</p>
                 <button class="gdl-shutdown-btn" type="button">Shutdown App</button>
             </div>
         </div>`;
@@ -342,7 +346,9 @@
         autoplayInput.checked = settings.autoplay;
         autoplayInput.addEventListener("change", () => {
             settings.autoplay = autoplayInput.checked;
+            settings.userWantsPlaying = settings.autoplay;
             save();
+            updateContext();
         });
 
         playButton.addEventListener("click", () => void (audio.paused ? play() : pause()));
@@ -415,9 +421,7 @@
         new MutationObserver(updateContext).observe(document.documentElement, { childList: true, subtree: true });
         addEventListener("popstate", updateContext);
         
-        if (settings.autoplay && !settings.disabled) {
-            void tryAutoplay();
-        }
+        updateContext();
     }
 
     window.addEventListener("keydown", (event) => {
@@ -457,16 +461,16 @@
             return;
         }
 
-        if (event.altKey && !event.ctrlKey && !event.shiftKey && event.key === 'ArrowUp') {
+        if (event.altKey && !event.ctrlKey && !event.shiftKey && (event.key === '[' || event.key === '-')) {
             event.preventDefault();
-            api.setVolume(audio.volume + 0.05);
+            api.setVolume(audio.volume - 0.05);
             showToast(`Volume: ${Math.round(audio.volume * 100)}%`);
             return;
         }
 
-        if (event.altKey && !event.ctrlKey && !event.shiftKey && event.key === 'ArrowDown') {
+        if (event.altKey && !event.ctrlKey && !event.shiftKey && (event.key === ']' || event.key === '=' || event.key === '+')) {
             event.preventDefault();
-            api.setVolume(audio.volume - 0.05);
+            api.setVolume(audio.volume + 0.05);
             showToast(`Volume: ${Math.round(audio.volume * 100)}%`);
             return;
         }
@@ -492,7 +496,7 @@
     };
     
     window.GeoDuelsMusic = api;
-    
+
     if (document.body) mount();
     else addEventListener("DOMContentLoaded", mount, { once: true });
 })();
