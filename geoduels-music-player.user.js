@@ -40,7 +40,7 @@
     };
 
     const audio = new Audio();
-    audio.preload = "none"; // 關閉預載，避免瀏覽器囤積舊的廣播緩衝導致延遲
+    audio.preload = "none";
     audio.volume = Math.max(0, Math.min(1, settings.volume));
 
     let root, playButton, panel, volume, autoplayInput, expanded = false, lastContext = "";
@@ -124,7 +124,6 @@
     function play() {
         if (settings.disabled) return Promise.resolve(false);
         
-        // 確保是連線到最新的即時串流，清除舊緩衝避免播放延遲
         if (audio.paused || !audio.src) {
             audio.src = STREAM_URL;
             audio.load();
@@ -158,12 +157,11 @@
             pendingAutoplay = true;
             const unlock = () => {
                 if (pendingAutoplay && audio.paused && settings.autoplay && !settings.disabled && settings.scopes[context()]) {
-                    play(); // 當使用者第一次互動時觸發播放
+                    play();
                 }
                 window.removeEventListener("pointerdown", unlock);
                 window.removeEventListener("keydown", unlock);
             };
-            // 監聽第一次點擊或鍵盤按鍵來解除瀏覽器限制
             window.addEventListener("pointerdown", unlock, { once: true });
             window.addEventListener("keydown", unlock, { once: true });
             return false;
@@ -180,7 +178,7 @@
     function shutdown() {
         settings.disabled = true;
         pause();
-        audio.removeAttribute("src"); // 徹底中斷連線
+        audio.removeAttribute("src");
         audio.load();
         expanded = false;
         save();
