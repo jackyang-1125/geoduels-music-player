@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         GeoDuels Lofi / Chill Player
 // @namespace    https://geoduels.io/
-// @version      2.0.2
-// @description  Minimal Lofi / Chill player for the GeoDuels lobby and games.
+// @version      2.0.5
+// @description  Minimal Lofi / Chill player for the GeoDuels lobby and games with hotkey toggle (Alt + M).
 // @match        https://geoduels.io/*
 // @match        https://*.geoduels.io/*
 // @noframes
@@ -20,6 +20,7 @@
 
     const defaults = {
         volume: 0.55,
+        autoplay: true,
         scopes: { lobby: true, single: false, duel: false },
         position: null
     };
@@ -31,7 +32,8 @@
     const saved = parse(localStorage.getItem(KEY)) || {};
     const settings = {
         volume: Number.isFinite(saved.volume) ? saved.volume : defaults.volume,
-        scopes: { ...defaults.scopes, ...(saved.scopes || {}), lobby: true },
+        autoplay: typeof saved.autoplay === "boolean" ? saved.autoplay : defaults.autoplay,
+        scopes: { ...defaults.scopes, ...(saved.scopes || {}) },
         position: saved.position || null
     };
 
@@ -39,10 +41,44 @@
     audio.preload = "none";
     audio.volume = Math.max(0, Math.min(1, settings.volume));
 
-    let root, playButton, panel, volume, expanded = false, lastContext = "";
+    let root, playButton, panel, volume, autoplayInput, expanded = false, lastContext = "";
 
     function save() {
         localStorage.setItem(KEY, JSON.stringify(settings));
+    }
+
+    function showToast(message) {
+        let toast = document.getElementById("gdl-toast");
+        if (!toast) {
+            toast = document.createElement("div");
+            toast.id = "gdl-toast";
+            toast.style.cssText = `
+                position: fixed;
+                bottom: 24px;
+                left: 50%;
+                transform: translateX(-50%);
+                background: rgba(11, 18, 29, 0.95);
+                border: 1px solid #65d4a6;
+                color: #fff;
+                padding: 8px 16px;
+                border-radius: 20px;
+                font: 12px/1.4 system-ui, sans-serif;
+                z-index: 2147483647;
+                box-shadow: 0 4px 14px rgba(0,0,0,0.4);
+                transition: opacity 0.3s, transform 0.3s;
+                pointer-events: none;
+                opacity: 0;
+            `;
+            document.body.appendChild(toast);
+        }
+        toast.textContent = message;
+        toast.style.opacity = "1";
+        toast.style.transform = "translateX(-50%) translateY(0)";
+        clearTimeout(toast._timer);
+        toast._timer = setTimeout(() => {
+            toast.style.opacity = "0";
+            toast.style.transform = "translateX(-50%) translateY(10px)";
+        }, 3200);
     }
 
     function context() {
@@ -55,13 +91,15 @@
         if (!root) return;
         const place = context();
         root.hidden = !settings.scopes[place];
-        root.classList.toggle("gdl-compact", place !== "lobby");
-        panel.hidden = !expanded || place !== "lobby";
+        panel.hidden = !expanded;
 
         if (place !== lastContext) {
             lastContext = place;
-            if (settings.scopes[place]) void play();
-            else pause();
+            if (settings.scopes[place]) {
+                if (settings.autoplay || !audio.paused) void play();
+            } else {
+                pause();
+            }
         }
     }
 
@@ -123,14 +161,10 @@
             #geoduels-lofi-player .gdl-panel { position: absolute; top: 43px; right: 0; width: 148px; padding: 7px; border: 1px solid #65d4a6; border-radius: 8px; background: #0b121df7; box-shadow: 0 4px 18px #0008; }
             #geoduels-lofi-player label { display: block; margin: 6px 0 3px; color: #c7d4df; font-size: 10px; }
             #geoduels-lofi-player .gdl-scopes { display: flex; gap: 5px; }
-            #geoduels-lofi-player .gdl-scopes label { display: flex; align-items: center; gap: 2px; margin: 0; }
+            #geoduels-lofi-player .gdl-scopes label, #geoduels-lofi-player .gdl-toggle-label { display: flex; align-items: center; gap: 3px; margin: 0; }
+            #geoduels-lofi-player .gdl-toggle-row { margin: 6px 0 2px; }
             #geoduels-lofi-player input[type=range] { width: 100%; accent-color: #65d4a6; }
             #geoduels-lofi-player .gdl-note { margin: 6px 0 0; color: #9eb1bf; font-size: 9px; line-height: 1.2; }
-            #geoduels-lofi-player.gdl-compact { width: 38px; }
-            #geoduels-lofi-player.gdl-compact .gdl-card { border-radius: 50%; }
-            #geoduels-lofi-player.gdl-compact .gdl-row { padding: 4px; }
-            #geoduels-lofi-player.gdl-compact .gdl-settings, #geoduels-lofi-player.gdl-compact .gdl-panel { display: none; }
-            #geoduels-lofi-player.gdl-compact .gdl-play { width: 30px; height: 30px; padding: 0; border-radius: 50%; }
         </style>
         <div class="gdl-card">
             <div class="gdl-row">
@@ -147,6 +181,9 @@
                     <label><input data-scope="single" type="checkbox">Solo</label>
                     <label><input data-scope="duel" type="checkbox">Duel</label>
                 </div>
+                <div class="gdl-toggle-row">
+                    <label class="gdl-toggle-label"><input class="gdl-autoplay" type="checkbox">Autoplay</label>
+                </div>
                 <label>Volume</label>
                 <input class="gdl-volume" type="range" min="0" max="100" aria-label="Volume">
                 <p class="gdl-note">Instrumental Chillsynth stream</p>
@@ -158,17 +195,26 @@
         playButton = root.querySelector(".gdl-play");
         panel = root.querySelector(".gdl-panel");
         volume = root.querySelector(".gdl-volume");
+        autoplayInput = root.querySelector(".gdl-autoplay");
 
         root.addEventListener("dragstart", (e) => e.preventDefault());
 
         root.querySelectorAll("[data-scope]").forEach((box) => {
             box.checked = settings.scopes[box.dataset.scope];
             box.addEventListener("change", () => {
-                settings.scopes[box.dataset.scope] = box.dataset.scope === "lobby" ? true : box.checked;
-                if (box.dataset.scope === "lobby") box.checked = true;
+                settings.scopes[box.dataset.scope] = box.checked;
                 save();
                 updateContext();
+                if (box.dataset.scope === "lobby" && !box.checked) {
+                    showToast("Player hidden in Lobby. Press Alt + M to reopen.");
+                }
             });
+        });
+
+        autoplayInput.checked = settings.autoplay;
+        autoplayInput.addEventListener("change", () => {
+            settings.autoplay = autoplayInput.checked;
+            save();
         });
 
         playButton.addEventListener("click", () => void (audio.paused ? play() : pause()));
@@ -226,8 +272,25 @@
         new MutationObserver(updateContext).observe(document.documentElement, { childList: true, subtree: true });
         addEventListener("popstate", updateContext);
 
-        void play();
+        if (settings.autoplay) {
+            void play();
+        }
     }
+
+    window.addEventListener("keydown", (event) => {
+        if (['INPUT', 'TEXTAREA'].includes(event.target.tagName) || event.target.isContentEditable) return;
+        if (event.altKey && (event.key === 'm' || event.key === 'M')) {
+            event.preventDefault();
+            const place = context();
+            const willShow = !settings.scopes[place];
+            settings.scopes[place] = willShow;
+            save();
+            updateContext();
+            const targetBox = root?.querySelector(`[data-scope="${place}"]`);
+            if (targetBox) targetBox.checked = willShow;
+            showToast(willShow ? `Music Player enabled (${place})` : `Music Player hidden (Alt + M to reopen)`);
+        }
+    });
 
     audio.addEventListener("play", () => { render(); emit(); });
     audio.addEventListener("pause", () => { render(); emit(); });
