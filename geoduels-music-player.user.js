@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GeoDuels Lofi / Chill Player
 // @namespace    https://geoduels.io/
-// @version      3.2.1
+// @version      3.2.2
 // @description  Modern music player for GeoDuels with Ranked & Party detection, auto-hide on inactive scenes, and sleek switches.
 // @match        https://geoduels.io/*
 // @match        https://*.geoduels.io/*
@@ -114,41 +114,63 @@
     function context() {
         const path = location.pathname.toLowerCase();
         const search = location.search.toLowerCase();
+        const nextRoute = (window.__NEXT_DATA__?.page || "").toLowerCase();
 
-        // 1. Party / Custom Game Rooms
-        if (path.includes("/party") || path.includes("/room") || path.includes("/custom") || search.includes("party") || search.includes("room")) {
+        // 1. Party & Custom Room Check
+        if (
+            path.includes("/party") ||
+            path.includes("/room") ||
+            path.includes("/custom") ||
+            search.includes("party") ||
+            search.includes("room") ||
+            nextRoute.includes("/party") ||
+            nextRoute.includes("/room") ||
+            document.querySelector('[data-testid*="party"], [data-testid*="room"], .party-lobby, .room-lobby')
+        ) {
             return "partyduel";
         }
-        if (document.querySelector('[data-testid*="party"], [data-testid*="room"], .party-lobby, .room-lobby')) {
-            return "partyduel";
-        }
 
-        // 2. Singleplayer Mode
-        if (path.startsWith("/single") || path.includes("/singleplayer") || search.includes("single")) {
+        // 2. Explicit Singleplayer Route Check
+        if (
+            path.startsWith("/single") ||
+            path.includes("/singleplayer") ||
+            path.includes("/practice") ||
+            search.includes("single") ||
+            nextRoute.includes("/single") ||
+            document.querySelector('[data-testid="singleplayer-ui"], [data-mode="singleplayer"]')
+        ) {
             return "single";
         }
 
-        // 3. Active Gameplay Match Detection
-        if (/^\/(match|game|duel|play)(\/|$)/i.test(path)) {
+        // 3. Match / Duel Gameplay Detection
+        const isMatchPath = /^\/(match|matches|game|duel|ranked)(\/|$)/i.test(path) ||
+                            nextRoute.includes("/match") ||
+                            nextRoute.includes("/duel");
+
+        const hasDuelElements = !!(
+            document.querySelector('[data-testid="timer-pill"]') ||
+            document.querySelector('[data-testid="health-bar"]') ||
+            document.querySelector('[class*="health-bar"], [class*="healthBar"]') ||
+            document.querySelector('[class*="multiplier"]') ||
+            document.querySelector('.duel-header, [data-testid="duel-header"]') ||
+            document.querySelector('[aria-label*="HP"], [aria-label*="health"]') ||
+            (document.body && /damage multiplier|\b(1|1\.5|2|2\.5|3|4|5)x damage\b/i.test(document.body.innerText))
+        );
+
+        if (isMatchPath || hasDuelElements) {
             const isPartyMatch = document.querySelector('[data-mode="party"], [data-testid="party-badge"]') ||
-                                 document.body.innerText.includes("Party Duel") ||
-                                 document.body.innerText.includes("Custom Match");
+                                 (document.body && /party duel|custom match|2v2 duel/i.test(document.body.innerText));
             if (isPartyMatch) return "partyduel";
-
-            const timerPill = document.querySelector('[data-testid="timer-pill"]');
-            const minimap = document.querySelector('[data-testid="minimap-panel"]');
-
-            if (timerPill || /duel/i.test(path)) return "rankduel";
-            if (minimap) return "single";
             return "rankduel";
         }
 
-        // 4. Element Fallback Checks
-        const timerPill = document.querySelector('[data-testid="timer-pill"]');
-        const minimap = document.querySelector('[data-testid="minimap-panel"]');
-        if (timerPill) return "rankduel";
-        if (minimap) return "single";
+        // 4. In-Game Singleplayer Fallback
+        const hasMinimap = !!document.querySelector('[data-testid="minimap-panel"], canvas.mapboxgl-canvas, .leaflet-container, [data-testid="guess-map"]');
+        if (hasMinimap) {
+            return "single";
+        }
 
+        // 5. Lobby Default
         return "lobby";
     }
 
