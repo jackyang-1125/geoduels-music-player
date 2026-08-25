@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         GeoDuels Lofi / Chill Player
 // @namespace    https://geoduels.io/
-// @version      3.2.2
-// @description  Modern music player for GeoDuels with Ranked & Party detection, auto-hide on inactive scenes, and sleek switches.
+// @version      3.3.0
+// @description  Modern music player for GeoDuels with 3 startup playback modes, Ranked & Party detection, and glass UI.
 // @match        https://geoduels.io/*
 // @match        https://*.geoduels.io/*
 // @noframes
@@ -15,7 +15,7 @@
 
     if (window.top !== window.self) return;
 
-    const KEY = "geoduels-lofi-player:v3.2";
+    const KEY = "geoduels-lofi-player:v3.3";
     
     const STREAMS = [
         { name: "Chillsynth", url: "https://stream.nightride.fm/chillsynth.mp3" },
@@ -30,7 +30,7 @@
 
     const defaults = {
         volume: 0.55,
-        autoplay: true,
+        startupMode: "always",
         userWantsPlaying: true,
         autoHideInactive: true,
         disabled: false,
@@ -45,10 +45,27 @@
     }
 
     const saved = parse(localStorage.getItem(KEY)) || {};
+    
+    let resolvedStartupMode = defaults.startupMode;
+    if (typeof saved.startupMode === "string" && ["always", "never", "remember"].includes(saved.startupMode)) {
+        resolvedStartupMode = saved.startupMode;
+    } else if (typeof saved.autoplay === "boolean") {
+        resolvedStartupMode = saved.autoplay ? "always" : "never";
+    }
+
+    let initialPlayingState = defaults.userWantsPlaying;
+    if (resolvedStartupMode === "always") {
+        initialPlayingState = true;
+    } else if (resolvedStartupMode === "never") {
+        initialPlayingState = false;
+    } else if (resolvedStartupMode === "remember") {
+        initialPlayingState = typeof saved.userWantsPlaying === "boolean" ? saved.userWantsPlaying : defaults.userWantsPlaying;
+    }
+
     const settings = {
         volume: Number.isFinite(saved.volume) ? saved.volume : defaults.volume,
-        autoplay: typeof saved.autoplay === "boolean" ? saved.autoplay : defaults.autoplay,
-        userWantsPlaying: typeof saved.userWantsPlaying === "boolean" ? saved.userWantsPlaying : defaults.userWantsPlaying,
+        startupMode: resolvedStartupMode,
+        userWantsPlaying: initialPlayingState,
         autoHideInactive: typeof saved.autoHideInactive === "boolean" ? saved.autoHideInactive : defaults.autoHideInactive,
         disabled: typeof saved.disabled === "boolean" ? saved.disabled : defaults.disabled,
         uiHidden: typeof saved.uiHidden === "boolean" ? saved.uiHidden : defaults.uiHidden,
@@ -65,7 +82,7 @@
     audio.preload = "none";
     audio.volume = Math.max(0, Math.min(1, settings.volume));
 
-    let root, playButton, settingsButton, minimizeButton, panel, volumeSlider, autoplayInput, autoHideInput, streamSelect;
+    let root, playButton, settingsButton, minimizeButton, panel, volumeSlider, autoHideInput, streamSelect;
     let expanded = false;
     let pendingAutoplay = false;
 
@@ -300,7 +317,11 @@
 
     function revive() {
         settings.disabled = false;
-        settings.userWantsPlaying = settings.autoplay;
+        if (settings.startupMode === "always") {
+            settings.userWantsPlaying = true;
+        } else if (settings.startupMode === "never") {
+            settings.userWantsPlaying = false;
+        }
         save();
         updateContext();
         render();
@@ -492,7 +513,7 @@
                 color: #f1f5f9;
             }
 
-            /* Scope Pills - 2x2 Grid Layout */
+            /* Scope Pills - 2x2 Grid */
             #geoduels-lofi-player .gdl-scopes {
                 display: grid;
                 grid-template-columns: repeat(2, 1fr);
@@ -501,6 +522,7 @@
             #geoduels-lofi-player .gdl-chip {
                 position: relative;
                 cursor: pointer;
+                flex: 1;
             }
             #geoduels-lofi-player .gdl-chip input {
                 position: absolute;
@@ -528,6 +550,12 @@
             #geoduels-lofi-player .gdl-chip:hover span {
                 background: rgba(255, 255, 255, 0.1);
                 color: #fff;
+            }
+
+            /* 3-way Startup Mode Chips */
+            #geoduels-lofi-player .gdl-startup-modes {
+                display: flex;
+                gap: 4px;
             }
 
             /* Slider Toggle Switches */
@@ -684,18 +712,17 @@
                 <label class="gdl-chip"><input data-scope="partyduel" type="checkbox"><span>Party</span></label>
             </div>
 
+            <label class="gdl-label">On Startup</label>
+            <div class="gdl-startup-modes">
+                <label class="gdl-chip"><input name="gdl-startup" value="always" type="radio"><span>Always</span></label>
+                <label class="gdl-chip"><input name="gdl-startup" value="never" type="radio"><span>Never</span></label>
+                <label class="gdl-chip"><input name="gdl-startup" value="remember" type="radio"><span>Resume</span></label>
+            </div>
+
             <div class="gdl-toggle-row">
                 <label class="gdl-toggle-label" for="gdl-autohide-cb">Hide when inactive</label>
                 <label class="gdl-switch">
                     <input id="gdl-autohide-cb" class="gdl-autohide" type="checkbox">
-                    <span class="gdl-slider"></span>
-                </label>
-            </div>
-
-            <div class="gdl-toggle-row">
-                <label class="gdl-toggle-label" for="gdl-autoplay-cb">Autoplay on Load</label>
-                <label class="gdl-switch">
-                    <input id="gdl-autoplay-cb" class="gdl-autoplay" type="checkbox">
                     <span class="gdl-slider"></span>
                 </label>
             </div>
@@ -721,7 +748,6 @@
         minimizeButton = root.querySelector(".gdl-minimize");
         panel = root.querySelector(".gdl-panel");
         volumeSlider = root.querySelector(".gdl-volume");
-        autoplayInput = root.querySelector(".gdl-autoplay");
         autoHideInput = root.querySelector(".gdl-autohide");
         streamSelect = root.querySelector(".gdl-station-select");
 
@@ -739,20 +765,28 @@
             });
         });
 
+        root.querySelectorAll('input[name="gdl-startup"]').forEach((radio) => {
+            radio.checked = radio.value === settings.startupMode;
+            radio.addEventListener("change", () => {
+                if (radio.checked) {
+                    settings.startupMode = radio.value;
+                    save();
+                    const toastLabels = {
+                        always: "Startup: Always Autoplay",
+                        never: "Startup: Never Autoplay",
+                        remember: "Startup: Resume Last State"
+                    };
+                    showToast(toastLabels[radio.value] || "Startup mode updated");
+                }
+            });
+        });
+
         autoHideInput.checked = settings.autoHideInactive;
         autoHideInput.addEventListener("change", () => {
             settings.autoHideInactive = autoHideInput.checked;
             save();
             updateContext();
             showToast(settings.autoHideInactive ? "Auto-hide when inactive enabled" : "Auto-hide disabled (Always visible)");
-        });
-
-        autoplayInput.checked = settings.autoplay;
-        autoplayInput.addEventListener("change", () => {
-            settings.autoplay = autoplayInput.checked;
-            settings.userWantsPlaying = settings.autoplay;
-            save();
-            updateContext();
         });
 
         playButton.addEventListener("click", () => void (audio.paused ? play() : pause()));
