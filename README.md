@@ -1,4 +1,4 @@
-# GeoDuels Lofi / Chill Player
+# GeoDuels music Player
 
 A minimal, lightweight Userscript designed for [GeoDuels](https://geoduels.io/) that integrates a chill instrumental synth stream directly into the lobby and game interfaces.
 
