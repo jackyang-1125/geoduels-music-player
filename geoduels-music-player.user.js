@@ -1,8 +1,8 @@
 // ==UserScript==
-// @name         GeoDuels Lofi / Chill Player
+// @name         GeoDuels Lofi / Chill Player (with Custom MP3)
 // @namespace    https://geoduels.io/
-// @version      3.3.0
-// @description  Modern music player for GeoDuels with 3 startup playback modes, Ranked & Party detection, and glass UI.
+// @version      3.4.1
+// @description  Modern music player for GeoDuels with stable Lobby detection, 3 startup playback modes, Ranked & Party detection, Custom MP3 Upload (with loop), and glass UI.
 // @match        https://geoduels.io/*
 // @match        https://*.geoduels.io/*
 // @noframes
@@ -15,18 +15,23 @@
 
     if (window.top !== window.self) return;
 
-    const KEY = "geoduels-lofi-player:v3.3";
-    
-    const STREAMS = [
-        { name: "Chillsynth", url: "https://stream.nightride.fm/chillsynth.mp3" },
-        { name: "Groove Salad (Lofi / Chill)", url: "https://ice6.somafm.com/groovesalad-128-mp3" },
-        { name: "Synthwave", url: "https://stream.nightride.fm/nightride.mp3" },
-        { name: "Vaporwaves", url: "https://ice6.somafm.com/vaporwaves-128-mp3" },
-        { name: "Drone Zone (Ambient)", url: "https://ice6.somafm.com/dronezone-128-mp3" },
-        { name: "Secret Agent (Lounge)", url: "https://ice6.somafm.com/secretagent-128-mp3" },
-        { name: "Spacesynth", url: "https://stream.nightride.fm/spacesynth.mp3" },
-        { name: "DEF CON (Chill Beats)", url: "https://ice6.somafm.com/defcon-128-mp3" }
+    const KEY = "geoduels-lofi-player:v3.4";
+    const DB_NAME = "GeoDuelsPlayerDB";
+    const DB_STORE = "custom_tracks";
+
+    const DEFAULT_STREAMS = [
+        { name: "Chillsynth", url: "https://stream.nightride.fm/chillsynth.mp3", isCustom: false },
+        { name: "Groove Salad (Lofi / Chill)", url: "https://ice6.somafm.com/groovesalad-128-mp3", isCustom: false },
+        { name: "Synthwave", url: "https://stream.nightride.fm/nightride.mp3", isCustom: false },
+        { name: "Vaporwaves", url: "https://ice6.somafm.com/vaporwaves-128-mp3", isCustom: false },
+        { name: "Drone Zone (Ambient)", url: "https://ice6.somafm.com/dronezone-128-mp3", isCustom: false },
+        { name: "Secret Agent (Lounge)", url: "https://ice6.somafm.com/secretagent-128-mp3", isCustom: false },
+        { name: "Spacesynth", url: "https://stream.nightride.fm/spacesynth.mp3", isCustom: false },
+        { name: "DEF CON (Chill Beats)", url: "https://ice6.somafm.com/defcon-128-mp3", isCustom: false }
     ];
+
+    let STREAMS = [...DEFAULT_STREAMS];
+    let customTracks = [];
 
     const defaults = {
         volume: 0.55,
@@ -45,7 +50,7 @@
     }
 
     const saved = parse(localStorage.getItem(KEY)) || {};
-    
+
     let resolvedStartupMode = defaults.startupMode;
     if (typeof saved.startupMode === "string" && ["always", "never", "remember"].includes(saved.startupMode)) {
         resolvedStartupMode = saved.startupMode;
@@ -69,20 +74,99 @@
         autoHideInactive: typeof saved.autoHideInactive === "boolean" ? saved.autoHideInactive : defaults.autoHideInactive,
         disabled: typeof saved.disabled === "boolean" ? saved.disabled : defaults.disabled,
         uiHidden: typeof saved.uiHidden === "boolean" ? saved.uiHidden : defaults.uiHidden,
-        streamIndex: Number.isInteger(saved.streamIndex) && saved.streamIndex >= 0 && saved.streamIndex < STREAMS.length ? saved.streamIndex : defaults.streamIndex,
+        streamIndex: Number.isInteger(saved.streamIndex) && saved.streamIndex >= 0 ? saved.streamIndex : defaults.streamIndex,
         scopes: { ...defaults.scopes, ...(saved.scopes || {}) },
         position: saved.position || null
     };
+
+    function openDB() {
+        return new Promise((resolve, reject) => {
+            const req = indexedDB.open(DB_NAME, 1);
+            req.onupgradeneeded = (e) => {
+                const db = e.target.result;
+                if (!db.objectStoreNames.contains(DB_STORE)) {
+                    db.createObjectStore(DB_STORE, { keyPath: "id", autoIncrement: true });
+                }
+            };
+            req.onsuccess = () => resolve(req.result);
+            req.onerror = () => reject(req.error);
+        });
+    }
+
+    async function dbSaveTrack(name, blob) {
+        const db = await openDB();
+        return new Promise((resolve, reject) => {
+            const tx = db.transaction(DB_STORE, "readwrite");
+            const store = tx.objectStore(DB_STORE);
+            const req = store.add({ name, blob });
+            req.onsuccess = () => resolve(req.result);
+            req.onerror = () => reject(req.error);
+        });
+    }
+
+    async function dbGetTracks() {
+        const db = await openDB();
+        return new Promise((resolve, reject) => {
+            const tx = db.transaction(DB_STORE, "readonly");
+            const store = tx.objectStore(DB_STORE);
+            const req = store.getAll();
+            req.onsuccess = () => resolve(req.result || []);
+            req.onerror = () => reject(req.error);
+        });
+    }
+
+    async function dbDeleteTrack(id) {
+        const db = await openDB();
+        return new Promise((resolve, reject) => {
+            const tx = db.transaction(DB_STORE, "readwrite");
+            const store = tx.objectStore(DB_STORE);
+            const req = store.delete(id);
+            req.onsuccess = () => resolve();
+            req.onerror = () => reject(req.error);
+        });
+    }
+
+    async function loadCustomTracksFromDB() {
+        try {
+            const records = await dbGetTracks();
+            customTracks.forEach(t => { if (t.url) URL.revokeObjectURL(t.url); });
+            customTracks = records.map(r => ({
+                id: r.id,
+                name: `📁 [Custom] ${r.name}`,
+                blob: r.blob,
+                url: URL.createObjectURL(r.blob),
+                isCustom: true
+            }));
+            rebuildStreamsList();
+        } catch (e) {
+            console.error("Failed to load tracks from DB", e);
+        }
+    }
+
+    function rebuildStreamsList() {
+        STREAMS = [...customTracks, ...DEFAULT_STREAMS];
+        if (settings.streamIndex >= STREAMS.length) {
+            settings.streamIndex = 0;
+        }
+        updateSelectOptions();
+    }
 
     function currentStream() {
         return STREAMS[settings.streamIndex] || STREAMS[0];
     }
 
     const audio = new Audio();
-    audio.preload = "none";
+    audio.preload = "auto";
     audio.volume = Math.max(0, Math.min(1, settings.volume));
 
-    let root, playButton, settingsButton, minimizeButton, panel, volumeSlider, autoHideInput, streamSelect;
+    audio.addEventListener("ended", () => {
+        if (currentStream().isCustom && settings.userWantsPlaying) {
+            audio.currentTime = 0;
+            audio.play().catch(() => {});
+        }
+    });
+
+    let root, playButton, settingsButton, minimizeButton, panel, volumeSlider, autoHideInput, streamSelect, fileInput, deleteBtn;
     let expanded = false;
     let pendingAutoplay = false;
 
@@ -133,7 +217,6 @@
         const search = location.search.toLowerCase();
         const nextRoute = (window.__NEXT_DATA__?.page || "").toLowerCase();
 
-        // 1. Party & Custom Room Check
         if (
             path.includes("/party") ||
             path.includes("/room") ||
@@ -141,13 +224,11 @@
             search.includes("party") ||
             search.includes("room") ||
             nextRoute.includes("/party") ||
-            nextRoute.includes("/room") ||
-            document.querySelector('[data-testid*="party"], [data-testid*="room"], .party-lobby, .room-lobby')
+            nextRoute.includes("/room")
         ) {
             return "partyduel";
         }
 
-        // 2. Explicit Singleplayer Route Check
         if (
             path.startsWith("/single") ||
             path.includes("/singleplayer") ||
@@ -159,35 +240,20 @@
             return "single";
         }
 
-        // 3. Match / Duel Gameplay Detection
         const isMatchPath = /^\/(match|matches|game|duel|ranked)(\/|$)/i.test(path) ||
                             nextRoute.includes("/match") ||
                             nextRoute.includes("/duel");
 
-        const hasDuelElements = !!(
-            document.querySelector('[data-testid="timer-pill"]') ||
-            document.querySelector('[data-testid="health-bar"]') ||
-            document.querySelector('[class*="health-bar"], [class*="healthBar"]') ||
-            document.querySelector('[class*="multiplier"]') ||
-            document.querySelector('.duel-header, [data-testid="duel-header"]') ||
-            document.querySelector('[aria-label*="HP"], [aria-label*="health"]') ||
-            (document.body && /damage multiplier|\b(1|1\.5|2|2\.5|3|4|5)x damage\b/i.test(document.body.innerText))
-        );
-
-        if (isMatchPath || hasDuelElements) {
-            const isPartyMatch = document.querySelector('[data-mode="party"], [data-testid="party-badge"]') ||
+        // Resolve match context from the route first. React can temporarily
+        // render party/room/map elements while the Lobby is hydrating; those
+        // elements must not override the actual route and hide the player.
+        if (isMatchPath) {
+            const isPartyMatch = document.querySelector('[data-mode="party"], [data-testid="party-badge"], [data-testid="party-match"]') ||
                                  (document.body && /party duel|custom match|2v2 duel/i.test(document.body.innerText));
             if (isPartyMatch) return "partyduel";
             return "rankduel";
         }
 
-        // 4. In-Game Singleplayer Fallback
-        const hasMinimap = !!document.querySelector('[data-testid="minimap-panel"], canvas.mapboxgl-canvas, .leaflet-container, [data-testid="guess-map"]');
-        if (hasMinimap) {
-            return "single";
-        }
-
-        // 5. Lobby Default
         return "lobby";
     }
 
@@ -209,7 +275,7 @@
 
         const place = context();
         const isScopeActive = !!settings.scopes[place];
-        
+
         const shouldHide = settings.uiHidden || (!isScopeActive && settings.autoHideInactive);
         root.hidden = shouldHide;
 
@@ -241,23 +307,36 @@
         if (settingsButton) settingsButton.classList.toggle("is-active", expanded);
     }
 
+    function updateSelectOptions() {
+        if (!streamSelect) return;
+        streamSelect.innerHTML = STREAMS.map((s, idx) => `<option value="${idx}">${s.name}</option>`).join("");
+        streamSelect.value = String(settings.streamIndex);
+        if (deleteBtn) {
+            deleteBtn.style.display = currentStream().isCustom ? "block" : "none";
+        }
+    }
+
     function render() {
         if (!root) return;
         playButton.classList.toggle("is-playing", !audio.paused);
         playButton.setAttribute("aria-label", audio.paused ? "Play" : "Pause");
         volumeSlider.value = String(Math.round(audio.volume * 100));
         if (streamSelect) streamSelect.value = String(settings.streamIndex);
+        if (deleteBtn) deleteBtn.style.display = currentStream().isCustom ? "block" : "none";
     }
 
     function play() {
         if (settings.disabled) return Promise.resolve(false);
         settings.userWantsPlaying = true;
         save();
+
         const stream = currentStream();
+        audio.loop = !!stream.isCustom;
+
         if (audio.src !== stream.url) {
             audio.src = stream.url;
         }
-        
+
         return audio.play().then(() => {
             pendingAutoplay = false;
             render();
@@ -293,15 +372,18 @@
         save();
         const stream = currentStream();
         if (streamSelect) streamSelect.value = String(settings.streamIndex);
-        const wasPlaying = settings.userWantsPlaying;
+        if (deleteBtn) deleteBtn.style.display = stream.isCustom ? "block" : "none";
+
+        audio.loop = !!stream.isCustom;
         audio.src = stream.url;
-        if (wasPlaying) {
+
+        if (settings.userWantsPlaying) {
             play();
         } else {
             render();
             emit();
         }
-        showToast(`Station: ${stream.name}`);
+        showToast(`Playing: ${stream.name}${stream.isCustom ? " (Looping 🔁)" : ""}`);
     }
 
     function shutdown() {
@@ -335,13 +417,36 @@
         window.dispatchEvent(new CustomEvent("geoduels-music:statechange", { detail: api.getState() }));
     }
 
+    async function handleFileUpload(file) {
+        if (!file) return;
+        try {
+            showToast("Saving custom audio...");
+            await dbSaveTrack(file.name, file);
+            await loadCustomTracksFromDB();
+            setStation(0);
+            showToast(`Uploaded & Looping: ${file.name}`);
+        } catch (err) {
+            console.error(err);
+            showToast("Failed to upload MP3");
+        }
+    }
+
+    async function handleDeleteCurrentCustom() {
+        const stream = currentStream();
+        if (!stream.isCustom) return;
+        if (confirm(`Are you sure you want to delete "${stream.name}"?`)) {
+            await dbDeleteTrack(stream.id);
+            await loadCustomTracksFromDB();
+            setStation(0);
+            showToast("Deleted custom MP3");
+        }
+    }
+
     function mount() {
         if (document.getElementById("geoduels-lofi-player")) return;
 
         root = document.createElement("section");
         root.id = "geoduels-lofi-player";
-
-        const optionsHtml = STREAMS.map((s, idx) => `<option value="${idx}">${s.name}</option>`).join("");
 
         root.innerHTML = `
         <style>
@@ -358,14 +463,9 @@
                 -webkit-user-select: none;
                 -webkit-user-drag: none;
             }
-            #geoduels-lofi-player * {
-                box-sizing: border-box;
-            }
-            #geoduels-lofi-player[hidden] {
-                display: none !important;
-            }
+            #geoduels-lofi-player * { box-sizing: border-box; }
+            #geoduels-lofi-player[hidden] { display: none !important; }
 
-            /* Floating Control Pill */
             #geoduels-lofi-player .gdl-bar {
                 display: flex;
                 align-items: center;
@@ -380,15 +480,12 @@
                 cursor: grab;
                 transition: border-color 0.2s, box-shadow 0.2s;
             }
-            #geoduels-lofi-player .gdl-bar:active {
-                cursor: grabbing;
-            }
+            #geoduels-lofi-player .gdl-bar:active { cursor: grabbing; }
             #geoduels-lofi-player .gdl-bar:hover {
                 border-color: rgba(52, 211, 153, 0.35);
                 box-shadow: 0 8px 28px rgba(0, 0, 0, 0.55), 0 0 12px rgba(52, 211, 153, 0.12);
             }
 
-            /* Buttons */
             #geoduels-lofi-player .gdl-btn {
                 display: inline-flex;
                 align-items: center;
@@ -409,11 +506,8 @@
                 color: #fff;
                 transform: scale(1.05);
             }
-            #geoduels-lofi-player .gdl-btn:active {
-                transform: scale(0.95);
-            }
+            #geoduels-lofi-player .gdl-btn:active { transform: scale(0.95); }
 
-            /* Play / Pause Button */
             #geoduels-lofi-player .gdl-play {
                 width: 32px;
                 height: 32px;
@@ -427,15 +521,9 @@
                 box-shadow: 0 3px 12px rgba(16, 185, 129, 0.5);
                 transform: scale(1.06);
             }
-            #geoduels-lofi-player .gdl-play .gdl-icon-pause {
-                display: none;
-            }
-            #geoduels-lofi-player .gdl-play.is-playing {
-                background: #059669;
-            }
-            #geoduels-lofi-player .gdl-play.is-playing .gdl-icon-play {
-                display: none;
-            }
+            #geoduels-lofi-player .gdl-play .gdl-icon-pause { display: none; }
+            #geoduels-lofi-player .gdl-play.is-playing { background: #059669; }
+            #geoduels-lofi-player .gdl-play.is-playing .gdl-icon-play { display: none; }
             #geoduels-lofi-player .gdl-play.is-playing .gdl-icon-pause {
                 display: flex;
                 gap: 2.5px;
@@ -455,14 +543,13 @@
                 color: #34d399;
             }
 
-            /* Settings Popover Panel */
             #geoduels-lofi-player .gdl-panel {
                 position: absolute;
                 top: 44px;
                 right: 0;
-                width: 220px;
+                width: 230px;
                 padding: 12px;
-                background: rgba(13, 20, 30, 0.92);
+                background: rgba(13, 20, 30, 0.94);
                 backdrop-filter: blur(18px);
                 -webkit-backdrop-filter: blur(18px);
                 border: 1px solid rgba(255, 255, 255, 0.12);
@@ -479,7 +566,6 @@
                 pointer-events: auto;
             }
 
-            /* Panel Elements */
             #geoduels-lofi-player .gdl-label {
                 display: block;
                 margin: 8px 0 4px;
@@ -489,9 +575,7 @@
                 text-transform: uppercase;
                 letter-spacing: 0.6px;
             }
-            #geoduels-lofi-player .gdl-label:first-child {
-                margin-top: 0;
-            }
+            #geoduels-lofi-player .gdl-label:first-child { margin-top: 0; }
 
             #geoduels-lofi-player select {
                 width: 100%;
@@ -505,15 +589,49 @@
                 cursor: pointer;
                 transition: border-color 0.15s;
             }
-            #geoduels-lofi-player select:hover, #geoduels-lofi-player select:focus {
-                border-color: #34d399;
+            #geoduels-lofi-player select:hover, #geoduels-lofi-player select:focus { border-color: #34d399; }
+            #geoduels-lofi-player select option { background: #0f172a; color: #f1f5f9; }
+
+            #geoduels-lofi-player .gdl-upload-row {
+                display: flex;
+                gap: 5px;
+                margin-top: 5px;
             }
-            #geoduels-lofi-player select option {
-                background: #0f172a;
-                color: #f1f5f9;
+            #geoduels-lofi-player .gdl-custom-btn {
+                flex: 1;
+                background: rgba(52, 211, 153, 0.15);
+                border: 1px dashed rgba(52, 211, 153, 0.4);
+                border-radius: 6px;
+                color: #34d399;
+                font-size: 10px;
+                font-weight: 600;
+                padding: 5px;
+                cursor: pointer;
+                transition: all 0.15s ease;
+                text-align: center;
+            }
+            #geoduels-lofi-player .gdl-custom-btn:hover {
+                background: rgba(52, 211, 153, 0.25);
+                border-color: #34d399;
+                color: #fff;
+            }
+            #geoduels-lofi-player .gdl-del-btn {
+                display: none;
+                background: rgba(239, 68, 68, 0.15);
+                border: 1px solid rgba(239, 68, 68, 0.35);
+                border-radius: 6px;
+                color: #fca5a5;
+                font-size: 10px;
+                font-weight: 600;
+                padding: 0 7px;
+                cursor: pointer;
+                transition: all 0.15s ease;
+            }
+            #geoduels-lofi-player .gdl-del-btn:hover {
+                background: rgba(239, 68, 68, 0.3);
+                color: #fff;
             }
 
-            /* Scope Pills - 2x2 Grid */
             #geoduels-lofi-player .gdl-scopes {
                 display: grid;
                 grid-template-columns: repeat(2, 1fr);
@@ -552,13 +670,8 @@
                 color: #fff;
             }
 
-            /* 3-way Startup Mode Chips */
-            #geoduels-lofi-player .gdl-startup-modes {
-                display: flex;
-                gap: 4px;
-            }
+            #geoduels-lofi-player .gdl-startup-modes { display: flex; gap: 4px; }
 
-            /* Slider Toggle Switches */
             #geoduels-lofi-player .gdl-toggle-row {
                 display: flex;
                 align-items: center;
@@ -578,12 +691,7 @@
                 display: inline-block;
                 margin: 0;
             }
-            #geoduels-lofi-player .gdl-switch input {
-                opacity: 0;
-                width: 0;
-                height: 0;
-                position: absolute;
-            }
+            #geoduels-lofi-player .gdl-switch input { opacity: 0; width: 0; height: 0; position: absolute; }
             #geoduels-lofi-player .gdl-slider {
                 position: absolute;
                 cursor: pointer;
@@ -603,23 +711,14 @@
                 transition: .2s cubic-bezier(0.4, 0, 0.2, 1);
                 border-radius: 50%;
             }
-            #geoduels-lofi-player .gdl-switch input:checked + .gdl-slider {
-                background-color: #10b981;
-            }
-            #geoduels-lofi-player .gdl-switch input:checked + .gdl-slider:before {
-                transform: translateX(14px);
-            }
+            #geoduels-lofi-player .gdl-switch input:checked + .gdl-slider { background-color: #10b981; }
+            #geoduels-lofi-player .gdl-switch input:checked + .gdl-slider:before { transform: translateX(14px); }
 
-            /* Volume Range */
             #geoduels-lofi-player .gdl-vol-wrap {
                 display: flex;
                 align-items: center;
                 gap: 8px;
                 margin-top: 2px;
-            }
-            #geoduels-lofi-player .gdl-vol-icon {
-                color: #94a3b8;
-                font-size: 10px;
             }
             #geoduels-lofi-player input[type=range] {
                 -webkit-appearance: none;
@@ -642,11 +741,7 @@
                 cursor: pointer;
                 transition: transform 0.1s;
             }
-            #geoduels-lofi-player input[type=range]::-webkit-slider-thumb:hover {
-                transform: scale(1.2);
-            }
 
-            /* Shortcuts Cheat Sheet */
             #geoduels-lofi-player .gdl-shortcuts {
                 margin: 10px 0 0;
                 padding: 6px 8px;
@@ -666,17 +761,16 @@
                 font-family: inherit;
             }
 
-            /* Shutdown Button */
             #geoduels-lofi-player .gdl-shutdown-btn {
                 width: 100%;
-                margin-top: 10px;
+                margin-top: 8px;
                 background: rgba(239, 68, 68, 0.12);
                 border: 1px solid rgba(239, 68, 68, 0.3);
                 border-radius: 6px;
                 color: #fca5a5;
                 font-size: 10px;
                 font-weight: 600;
-                padding: 6px;
+                padding: 5px;
                 cursor: pointer;
                 transition: all 0.15s ease;
             }
@@ -699,10 +793,14 @@
             </button>
         </div>
         <div class="gdl-panel">
-            <label class="gdl-label">Radio Station</label>
-            <select class="gdl-station-select">
-                ${optionsHtml}
-            </select>
+            <label class="gdl-label">Audio Track / Station</label>
+            <select class="gdl-station-select"></select>
+
+            <div class="gdl-upload-row">
+                <input type="file" class="gdl-file-input" accept="audio/*" style="display:none">
+                <button class="gdl-custom-btn" type="button">📁 Upload MP3 (Loop)</button>
+                <button class="gdl-del-btn" type="button" title="Delete custom track">🗑️</button>
+            </div>
 
             <label class="gdl-label">Play Music In</label>
             <div class="gdl-scopes">
@@ -740,9 +838,9 @@
 
             <button class="gdl-shutdown-btn" type="button">Shutdown App</button>
         </div>`;
-        
+
         document.body.append(root);
-        
+
         playButton = root.querySelector(".gdl-play");
         settingsButton = root.querySelector(".gdl-settings");
         minimizeButton = root.querySelector(".gdl-minimize");
@@ -750,11 +848,25 @@
         volumeSlider = root.querySelector(".gdl-volume");
         autoHideInput = root.querySelector(".gdl-autohide");
         streamSelect = root.querySelector(".gdl-station-select");
+        fileInput = root.querySelector(".gdl-file-input");
+        deleteBtn = root.querySelector(".gdl-del-btn");
 
-        streamSelect.value = String(settings.streamIndex);
+        loadCustomTracksFromDB().then(() => {
+            updateSelectOptions();
+        });
+
         streamSelect.addEventListener("change", () => {
             setStation(Number(streamSelect.value));
         });
+
+        root.querySelector(".gdl-custom-btn").addEventListener("click", () => fileInput.click());
+        fileInput.addEventListener("change", (e) => {
+            const file = e.target.files[0];
+            if (file) handleFileUpload(file);
+            fileInput.value = "";
+        });
+
+        deleteBtn.addEventListener("click", handleDeleteCurrentCustom);
 
         root.querySelectorAll("[data-scope]").forEach((box) => {
             box.checked = !!settings.scopes[box.dataset.scope];
@@ -790,7 +902,7 @@
         });
 
         playButton.addEventListener("click", () => void (audio.paused ? play() : pause()));
-        
+
         settingsButton.addEventListener("click", (e) => {
             e.stopPropagation();
             togglePanel();
@@ -825,7 +937,7 @@
         });
 
         if (settings.position && Number.isFinite(settings.position.x) && Number.isFinite(settings.position.y) &&
-            settings.position.x >= 0 && settings.position.y >= 0 && 
+            settings.position.x >= 0 && settings.position.y >= 0 &&
             settings.position.x < innerWidth - 40 && settings.position.y < innerHeight - 40) {
             root.style.left = `${settings.position.x}px`;
             root.style.top = `${settings.position.y}px`;
@@ -864,10 +976,10 @@
         bar.addEventListener("pointercancel", stopDrag);
 
         render();
-        
+
         new MutationObserver(updateContext).observe(document.documentElement, { childList: true, subtree: true });
         addEventListener("popstate", updateContext);
-        
+
         updateContext();
     }
 
@@ -932,7 +1044,7 @@
 
     audio.addEventListener("play", () => { render(); emit(); });
     audio.addEventListener("pause", () => { render(); emit(); });
-    
+
     const api = {
         play, pause, shutdown, revive,
         nextStation: () => setStation(settings.streamIndex + 1),
@@ -945,10 +1057,10 @@
             save(); render(); emit();
         },
         getState() {
-            return { playing: !audio.paused, volume: audio.volume, context: context(), disabled: settings.disabled, station: currentStream().name };
+            return { playing: !audio.paused, volume: audio.volume, context: context(), disabled: settings.disabled, station: currentStream().name, isLooping: audio.loop };
         }
     };
-    
+
     window.GeoDuelsMusic = api;
 
     if (document.body) mount();
