@@ -1,12 +1,10 @@
 // ==UserScript==
 // @name         GeoDuels Lofi / Chill Player (with Custom MP3)
 // @namespace    https://geoduels.io/
-// @version      3.4.3
-// @description  Modern music player for GeoDuels with stable Lobby detection, 3 startup playback modes, Ranked & Party detection, Custom MP3 Upload (with loop), and glass UI.
+// @version      3.9.4
+// @description  Modern music player for GeoDuels with stable Lobby detection, startup playback modes, Ranked and Party detection, custom MP3 upload with looping, and a glass UI.
 // @match        https://geoduels.io/*
 // @match        https://*.geoduels.io/*
-// @noframes
-// @grant        none
 // @run-at       document-idle
 // ==/UserScript==
 
@@ -42,7 +40,13 @@
         uiHidden: false,
         streamIndex: 0,
         scopes: { lobby: true, single: false, rankduel: false, partyduel: false },
-        position: null
+        position: null,
+        youtubePlaylistId: "",
+        youtubeVideoId: "",
+        youtubeMediaType: "playlist",
+        youtubeEnabled: false,
+        externalAudioUrl: "",
+        externalAudioTitle: ""
     };
 
     function parse(raw) {
@@ -76,7 +80,13 @@
         uiHidden: typeof saved.uiHidden === "boolean" ? saved.uiHidden : defaults.uiHidden,
         streamIndex: Number.isInteger(saved.streamIndex) && saved.streamIndex >= 0 ? saved.streamIndex : defaults.streamIndex,
         scopes: { ...defaults.scopes, ...(saved.scopes || {}) },
-        position: saved.position || null
+        position: saved.position || null,
+        youtubePlaylistId: typeof saved.youtubePlaylistId === "string" ? saved.youtubePlaylistId : defaults.youtubePlaylistId,
+        youtubeVideoId: typeof saved.youtubeVideoId === "string" ? saved.youtubeVideoId : defaults.youtubeVideoId,
+        youtubeMediaType: saved.youtubeMediaType === "video" ? "video" : defaults.youtubeMediaType,
+        youtubeEnabled: typeof saved.youtubeEnabled === "boolean" ? saved.youtubeEnabled : defaults.youtubeEnabled,
+        externalAudioUrl: typeof saved.externalAudioUrl === "string" ? saved.externalAudioUrl : defaults.externalAudioUrl,
+        externalAudioTitle: typeof saved.externalAudioTitle === "string" ? saved.externalAudioTitle : defaults.externalAudioTitle
     };
 
     function openDB() {
@@ -158,6 +168,7 @@
     const audio = new Audio();
     audio.preload = "auto";
     audio.volume = Math.max(0, Math.min(1, settings.volume));
+    initializeAudioSource();
 
     audio.addEventListener("ended", () => {
         if (currentStream().isCustom && settings.userWantsPlaying) {
@@ -170,6 +181,21 @@
     let expanded = false;
     let pendingAutoplay = false;
     let launchContext = null;
+    let youtubeFrame = null;
+    let youtubePlaylistInput = null;
+    let youtubeEnabledInput = null;
+    let youtubePlaying = false;
+    let youtubeEmbedButton = null;
+    let mp3ModeButton = null;
+    let youtubeModeButton = null;
+    let lastContext = null;
+    let returnToLobbyState = null;
+    try {
+        const storedReturnState = sessionStorage.getItem("geoduels-lofi-return-state");
+        if (storedReturnState) returnToLobbyState = JSON.parse(storedReturnState);
+    } catch (_) {
+        returnToLobbyState = null;
+    }
 
     try {
         const rememberedLaunchContext = sessionStorage.getItem("geoduels-lofi-launch-context");
@@ -182,6 +208,128 @@
     function save() {
         localStorage.setItem(KEY, JSON.stringify(settings));
     }
+
+    function normalizeYouTubeReference(value) {
+        const raw = String(value || "").trim();
+        if (!raw) return null;
+        const playlist = raw.match(/[?&]list=([A-Za-z0-9_-]+)/i);
+        if (playlist) return { type: "playlist", id: playlist[1] };
+        const video = raw.match(/[?&]v=([A-Za-z0-9_-]{6,})/i) ||
+            raw.match(/youtu\.be\/([A-Za-z0-9_-]{6,})/i) ||
+            raw.match(/youtube\.com\/embed\/([A-Za-z0-9_-]{6,})/i) ||
+            raw.match(/^([A-Za-z0-9_-]{6,})$/);
+        if (video) return { type: "video", id: video[1] };
+        return null;
+    }
+
+    function youtubeEmbedUrl(type, id, autoplay) {
+        const params = new URLSearchParams({
+            autoplay: autoplay ? "1" : "0",
+            controls: "1",
+            enablejsapi: "1",
+            loop: "1",
+            origin: location.origin
+        });
+        if (type === "playlist") {
+            params.set("listType", "playlist");
+            params.set("list", id);
+            return `https://www.youtube.com/embed?${params.toString()}`;
+        }
+        params.set("playlist", id);
+        return `https://www.youtube.com/embed/${encodeURIComponent(id)}?${params.toString()}`;
+    }
+
+    function initializeAudioSource() {
+        if (settings.youtubeEnabled) return;
+        if (settings.externalAudioUrl) {
+            audio.loop = false;
+            audio.src = settings.externalAudioUrl;
+            return;
+        }
+        const stream = currentStream();
+        if (!stream) return;
+        audio.loop = !!stream.isCustom;
+        if (audio.src !== stream.url) audio.src = stream.url;
+    }
+
+    function currentYouTubeEmbedUrl(autoplay) {
+        const type = settings.youtubeMediaType === "video" ? "video" : "playlist";
+        const id = type === "video" ? settings.youtubeVideoId : settings.youtubePlaylistId;
+        return id ? youtubeEmbedUrl(type, id, autoplay) : "about:blank";
+    }
+
+    function setYouTubePlaylist(value, autoplay = true) {
+        const media = normalizeYouTubeReference(value);
+        if (!media) {
+            showToast("Please enter a valid YouTube or YouTube Music video/playlist URL");
+            return false;
+        }
+        settings.youtubeMediaType = media.type;
+        settings.externalAudioUrl = "";
+        settings.externalAudioTitle = "";
+        settings.youtubePlaylistId = media.type === "playlist" ? media.id : "";
+        settings.youtubeVideoId = media.type === "video" ? media.id : "";
+        settings.youtubeEnabled = true;
+        settings.userWantsPlaying = autoplay;
+        youtubePlaying = autoplay;
+        audio.pause();
+        pendingAutoplay = false;
+        if (youtubeFrame) {
+            youtubeFrame.src = youtubeEmbedUrl(media.type, media.id, autoplay);
+            youtubeFrame.style.display = "block";
+        }
+        if (youtubeEnabledInput) youtubeEnabledInput.checked = true;
+        save();
+        render();
+        emit();
+        showToast(media.type === "video" ? "YouTube video embedded" : "YouTube playlist embedded");
+        return true;
+    }
+
+    function clearYouTubePlaylist() {
+        settings.youtubeEnabled = false;
+        settings.externalAudioUrl = "";
+        settings.externalAudioTitle = "";
+        youtubePlaying = false;
+        if (youtubeFrame) {
+            sendYouTubeCommand("stopVideo");
+            youtubeFrame.src = "about:blank";
+            youtubeFrame.style.display = "none";
+        }
+        if (youtubeEnabledInput) youtubeEnabledInput.checked = false;
+        save();
+        render();
+        emit();
+    }
+
+    function sendYouTubeCommand(func, args = []) {
+        if (!youtubeFrame?.contentWindow) return;
+        youtubeFrame.contentWindow.postMessage(JSON.stringify({ event: "command", func, args }), "*");
+    }
+
+    function announceYouTubePlayer() {
+        if (!youtubeFrame?.contentWindow) return;
+        const target = youtubeFrame.contentWindow;
+        target.postMessage(JSON.stringify({ event: "listening", id: "gdl-youtube-player", channel: "gdl" }), "*");
+        target.postMessage(JSON.stringify({ event: "command", func: "addEventListener", args: ["onStateChange"] }), "*");
+    }
+
+    window.addEventListener("message", (event) => {
+        if (!youtubeFrame || event.source !== youtubeFrame.contentWindow) return;
+        if (!String(event.origin || "").includes("youtube.com")) return;
+        try {
+            const message = typeof event.data === "string" ? JSON.parse(event.data) : event.data;
+            const stateValue = message?.info?.playerState ?? (message?.event === "onStateChange" ? message.info : undefined);
+            if (stateValue === undefined) return;
+            const state = Number(stateValue);
+            if (state === 1) { youtubePlaying = true; settings.userWantsPlaying = true; }
+            else if (state === 2 || state === 0) { youtubePlaying = false; settings.userWantsPlaying = false; }
+            else if (state === 5) { youtubePlaying = false; }
+            save();
+            render();
+            emit();
+        } catch (_) {}
+    });
 
     function showToast(message) {
         let toast = document.getElementById("gdl-toast");
@@ -227,8 +375,7 @@
         const nextRoute = String(window.__NEXT_DATA__?.page || "").toLowerCase();
         const bodyText = document.body?.innerText?.toLowerCase() || "";
 
-        // v2 uses real Next.js routes. Route state is authoritative during
-        // hydration; transient React DOM must not classify gameplay as Lobby.
+
         if (path === "/party" || path.startsWith("/party/") || path === "/room" ||
             path.startsWith("/room/") || search.includes("party") || search.includes("room") ||
             nextRoute.includes("/party") || nextRoute.includes("/room")) {
@@ -247,8 +394,6 @@
             nextRoute.includes("/match") || nextRoute.includes("/duel");
 
         if (isMatchPath) {
-            // Solo and Duels share /match/:id in v2. The launch click is the
-            // only reliable signal before the first websocket snapshot arrives.
             if (launchContext) return launchContext;
 
             const isPartyMatch = document.querySelector('[data-mode="party"], [data-mode="team_duel"], [data-testid="party-badge"], [data-testid="party-match"]') ||
@@ -259,7 +404,6 @@
                 /singleplayer|solo game|play solo/i.test(bodyText);
             if (isSoloMatch) return "single";
 
-            // An unresolved /match page is gameplay, never Lobby.
             return "rankduel";
         }
 
@@ -298,6 +442,58 @@
 
         const place = context();
         const isScopeActive = !!settings.scopes[place];
+        const isGameplayContext = place === "single" || place === "rankduel" || place === "partyduel";
+
+        if (lastContext === "lobby" && isGameplayContext && !returnToLobbyState) {
+            returnToLobbyState = {
+                userWantsPlaying: settings.userWantsPlaying,
+                streamIndex: settings.streamIndex,
+                youtubePlaylistId: settings.youtubePlaylistId,
+                youtubeVideoId: settings.youtubeVideoId,
+                youtubeMediaType: settings.youtubeMediaType,
+                youtubeEnabled: settings.youtubeEnabled,
+                externalAudioUrl: settings.externalAudioUrl,
+                externalAudioTitle: settings.externalAudioTitle,
+                wasPlaying: settings.youtubeEnabled ? youtubePlaying : !audio.paused
+            };
+            try {
+                sessionStorage.setItem("geoduels-lofi-return-state", JSON.stringify(returnToLobbyState));
+            } catch (_) {}
+        }
+
+        if (place === "lobby" && returnToLobbyState) {
+            const savedReturnState = returnToLobbyState;
+            returnToLobbyState = null;
+            try { sessionStorage.removeItem("geoduels-lofi-return-state"); } catch (_) {}
+            settings.userWantsPlaying = savedReturnState.userWantsPlaying;
+            settings.streamIndex = savedReturnState.streamIndex;
+            settings.youtubePlaylistId = savedReturnState.youtubePlaylistId || "";
+            settings.youtubeVideoId = savedReturnState.youtubeVideoId || "";
+            settings.youtubeMediaType = savedReturnState.youtubeMediaType === "video" ? "video" : "playlist";
+            settings.youtubeEnabled = savedReturnState.youtubeEnabled;
+            settings.externalAudioUrl = savedReturnState.externalAudioUrl || "";
+            settings.externalAudioTitle = savedReturnState.externalAudioTitle || "";
+            youtubePlaying = savedReturnState.youtubeEnabled && savedReturnState.wasPlaying;
+            pendingAutoplay = false;
+
+            if (settings.youtubeEnabled && (settings.youtubePlaylistId || settings.youtubeVideoId)) {
+                audio.pause();
+                if (youtubeFrame) {
+                    youtubeFrame.src = currentYouTubeEmbedUrl(youtubePlaying);
+                    youtubeFrame.style.display = youtubePlaying ? "block" : "none";
+                }
+            } else {
+                initializeAudioSource();
+                youtubePlaying = false;
+                if (youtubeFrame) {
+                    youtubeFrame.src = "about:blank";
+                    youtubeFrame.style.display = "none";
+                }
+            }
+            save();
+        }
+
+        lastContext = place;
 
         const shouldHide = settings.uiHidden || (!isScopeActive && settings.autoHideInactive);
         root.hidden = shouldHide;
@@ -307,9 +503,12 @@
         }
 
         if (!isScopeActive) {
-            // Do not let a rejected autoplay promise resurrect audio after
-            // navigating to a context whose checkbox is off.
             pendingAutoplay = false;
+            youtubePlaying = false;
+            if (youtubeFrame && settings.youtubeEnabled) {
+                sendYouTubeCommand("stopVideo");
+                youtubeFrame.style.display = "none";
+            }
             if (!audio.paused) {
                 audio.pause();
                 render();
@@ -317,10 +516,20 @@
             }
         } else {
             if (settings.userWantsPlaying) {
-                if (audio.paused && !pendingAutoplay) {
+                if (settings.youtubeEnabled && (settings.youtubePlaylistId || settings.youtubeVideoId)) {
+                    youtubePlaying = true;
+                    if (youtubeFrame) {
+                        const embedUrl = currentYouTubeEmbedUrl(true);
+                        if (youtubeFrame.src !== embedUrl) youtubeFrame.src = embedUrl;
+                        youtubeFrame.style.display = "block";
+                    }
+                    audio.pause();
+                    render();
+                } else if (audio.paused && !pendingAutoplay) {
                     play();
                 }
             } else {
+                if (settings.youtubeEnabled) youtubePlaying = false;
                 suspendAudio();
             }
         }
@@ -343,8 +552,11 @@
 
     function render() {
         if (!root) return;
-        playButton.classList.toggle("is-playing", !audio.paused);
-        playButton.setAttribute("aria-label", audio.paused ? "Play" : "Pause");
+        const isPlaying = settings.youtubeEnabled ? youtubePlaying : !audio.paused;
+        playButton.classList.toggle("is-playing", isPlaying);
+        if (mp3ModeButton) mp3ModeButton.classList.toggle("is-active", !settings.youtubeEnabled);
+        if (youtubeModeButton) youtubeModeButton.classList.toggle("is-active", settings.youtubeEnabled);
+        playButton.setAttribute("aria-label", isPlaying ? "Pause" : "Play");
         volumeSlider.value = String(Math.round(audio.volume * 100));
         if (streamSelect) streamSelect.value = String(settings.streamIndex);
         if (deleteBtn) deleteBtn.style.display = currentStream().isCustom ? "block" : "none";
@@ -353,14 +565,34 @@
     function play() {
         if (settings.disabled || !isCurrentScopeActive()) {
             audio.pause();
+            youtubePlaying = false;
             pendingAutoplay = false;
             render();
             return Promise.resolve(false);
         }
         settings.userWantsPlaying = true;
+        if (settings.youtubeEnabled && (settings.youtubePlaylistId || settings.youtubeVideoId)) {
+            youtubePlaying = true;
+            audio.pause();
+            if (youtubeFrame) {
+                const embedUrl = currentYouTubeEmbedUrl(true);
+                if (youtubeFrame.src !== embedUrl) youtubeFrame.src = embedUrl;
+                youtubeFrame.style.display = "block";
+                setTimeout(() => sendYouTubeCommand("playVideo"), 250);
+            }
+            save();
+            render();
+            emit();
+            return Promise.resolve(true);
+        }
         save();
 
         const stream = currentStream();
+        if (settings.externalAudioUrl) {
+            if (audio.src !== settings.externalAudioUrl) audio.src = settings.externalAudioUrl;
+            audio.loop = false;
+            return audio.play().then(() => { render(); emit(); return true; }).catch(() => false);
+        }
         audio.loop = !!stream.isCustom;
 
         if (audio.src !== stream.url) {
@@ -392,6 +624,11 @@
         settings.userWantsPlaying = false;
         save();
         audio.pause();
+        youtubePlaying = false;
+        if (youtubeFrame && settings.youtubeEnabled) sendYouTubeCommand("pauseVideo");
+        if (settings.youtubeEnabled && youtubeFrame) {
+            youtubeFrame.style.display = "block";
+        }
         pendingAutoplay = false;
         render();
         emit();
@@ -404,6 +641,15 @@
         if (streamSelect) streamSelect.value = String(settings.streamIndex);
         if (deleteBtn) deleteBtn.style.display = stream.isCustom ? "block" : "none";
 
+        settings.youtubeEnabled = false;
+        settings.externalAudioUrl = "";
+        settings.externalAudioTitle = "";
+        youtubePlaying = false;
+        if (youtubeFrame) {
+            sendYouTubeCommand("stopVideo");
+            youtubeFrame.src = "about:blank";
+            youtubeFrame.style.display = "none";
+        }
         audio.loop = !!stream.isCustom;
         audio.src = stream.url;
 
@@ -421,6 +667,12 @@
         settings.userWantsPlaying = false;
         audio.pause();
         audio.removeAttribute("src");
+        youtubePlaying = false;
+        if (youtubeFrame) {
+            sendYouTubeCommand("stopVideo");
+            youtubeFrame.src = "about:blank";
+            youtubeFrame.style.display = "none";
+        }
         togglePanel(false);
         save();
         updateContext();
@@ -579,6 +831,10 @@
                 right: 0;
                 width: 230px;
                 padding: 12px;
+                max-height: min(72vh, 560px);
+                overflow-y: auto;
+                overscroll-behavior: contain;
+                scrollbar-width: thin;
                 background: rgba(13, 20, 30, 0.94);
                 backdrop-filter: blur(18px);
                 -webkit-backdrop-filter: blur(18px);
@@ -621,6 +877,50 @@
             }
             #geoduels-lofi-player select:hover, #geoduels-lofi-player select:focus { border-color: #34d399; }
             #geoduels-lofi-player select option { background: #0f172a; color: #f1f5f9; }
+
+            #geoduels-lofi-player .gdl-yt-row {
+                display: flex;
+                gap: 5px;
+                margin-top: 5px;
+            }
+            #geoduels-lofi-player .gdl-yt-input {
+                min-width: 0;
+                flex: 1;
+                background: rgba(255,255,255,.07);
+                color: #f1f5f9;
+                border: 1px solid rgba(255,255,255,.12);
+                border-radius: 6px;
+                padding: 5px 7px;
+                font-size: 10px;
+                outline: none;
+            }
+            #geoduels-lofi-player .gdl-yt-input:focus { border-color: #34d399; }
+            #geoduels-lofi-player .gdl-yt-btn {
+                background: rgba(239,68,68,.16);
+                border: 1px solid rgba(239,68,68,.35);
+                border-radius: 6px;
+                color: #fecaca;
+                font-size: 10px;
+                font-weight: 600;
+                padding: 5px 7px;
+                cursor: pointer;
+            }
+
+            #geoduels-lofi-player .gdl-source-row { display: flex; flex-direction: column; gap: 6px; margin-top: 7px; }
+            #geoduels-lofi-player .gdl-panel::-webkit-scrollbar { width: 5px; }
+            #geoduels-lofi-player .gdl-panel::-webkit-scrollbar-thumb { background: rgba(148,163,184,.45); border-radius: 5px; }
+            #geoduels-lofi-player .gdl-source-btn { flex: 1; border: 1px solid rgba(255,255,255,.14); border-radius: 7px; padding: 6px 7px; color: #dbeafe; background: rgba(255,255,255,.06); font-size: 10px; cursor: pointer; }
+            #geoduels-lofi-player .gdl-source-btn:hover { border-color: #34d399; background: rgba(52,211,153,.12); }
+            #geoduels-lofi-player .gdl-source-btn.is-active { border-color: #34d399; color: #fff; background: rgba(16,185,129,.28); box-shadow: 0 0 0 1px rgba(52,211,153,.25) inset; }
+            #geoduels-lofi-player .gdl-yt-frame {
+                display: none;
+                width: 100%;
+                height: 130px;
+                margin-top: 7px;
+                border: 0;
+                border-radius: 8px;
+                background: #000;
+            }
 
             #geoduels-lofi-player .gdl-upload-row {
                 display: flex;
@@ -832,6 +1132,18 @@
                 <button class="gdl-del-btn" type="button" title="Delete custom track">🗑️</button>
             </div>
 
+            <label class="gdl-label">YouTube / YouTube Music</label>
+            <div class="gdl-yt-help">Search for a song yourself, then paste a YouTube or YouTube Music video or playlist URL below.</div>
+            <div class="gdl-yt-row">
+                <input class="gdl-yt-input gdl-yt-playlist" type="text" placeholder="YouTube / YouTube Music video or playlist URL">
+                <button class="gdl-yt-btn gdl-yt-embed-btn" type="button">Embed</button>
+            </div>
+            <div class="gdl-source-row">
+                <button class="gdl-source-btn gdl-mp3-mode" type="button">Use MP3 / Radio</button>
+                <button class="gdl-source-btn gdl-youtube-mode" type="button">Use YouTube / YouTube Music</button>
+            </div>
+            <iframe class="gdl-yt-frame" title="YouTube video or playlist" allow="autoplay; encrypted-media; picture-in-picture" allowfullscreen></iframe>
+
             <label class="gdl-label">Play Music In</label>
             <div class="gdl-scopes">
                 <label class="gdl-chip"><input data-scope="lobby" type="checkbox"><span>Lobby</span></label>
@@ -869,8 +1181,6 @@
             <button class="gdl-shutdown-btn" type="button">Shutdown App</button>
         </div>`;
 
-        // Wait for the first stable context evaluation so v2 hydration cannot
-        // show the player for one frame and then hide it.
         root.hidden = true;
         document.body.append(root);
 
@@ -883,9 +1193,31 @@
         streamSelect = root.querySelector(".gdl-station-select");
         fileInput = root.querySelector(".gdl-file-input");
         deleteBtn = root.querySelector(".gdl-del-btn");
+        youtubeFrame = root.querySelector(".gdl-yt-frame");
+        youtubeFrame?.addEventListener("load", () => {
+            if (settings.youtubeEnabled) setTimeout(announceYouTubePlayer, 100);
+        });
+        youtubePlaylistInput = root.querySelector(".gdl-yt-playlist");
+        youtubeEmbedButton = root.querySelector(".gdl-yt-embed-btn");
+        mp3ModeButton = root.querySelector(".gdl-mp3-mode");
+        youtubeModeButton = root.querySelector(".gdl-youtube-mode");
+        if (youtubePlaylistInput) {
+            youtubePlaylistInput.value = settings.youtubeMediaType === "video"
+                ? `https://music.youtube.com/watch?v=${settings.youtubeVideoId}`
+                : settings.youtubePlaylistId;
+        }
+        if (settings.youtubeEnabled && (settings.youtubePlaylistId || settings.youtubeVideoId)) {
+            youtubePlaying = settings.userWantsPlaying;
+            youtubeFrame.src = currentYouTubeEmbedUrl(youtubePlaying);
+            youtubeFrame.style.display = "block";
+        }
 
         loadCustomTracksFromDB().then(() => {
+            initializeAudioSource();
             updateSelectOptions();
+            if (!settings.youtubeEnabled && settings.userWantsPlaying && isCurrentScopeActive()) {
+                play();
+            }
         });
 
         streamSelect.addEventListener("change", () => {
@@ -899,7 +1231,32 @@
             fileInput.value = "";
         });
 
-        deleteBtn.addEventListener("click", handleDeleteCurrentCustom);
+                deleteBtn.addEventListener("click", handleDeleteCurrentCustom);
+        youtubeEmbedButton.addEventListener("click", () => {
+            setYouTubePlaylist(youtubePlaylistInput.value, true);
+        });
+        mp3ModeButton.addEventListener("click", () => {
+            const resume = settings.userWantsPlaying || youtubePlaying;
+            clearYouTubePlaylist();
+            settings.userWantsPlaying = resume;
+            initializeAudioSource();
+            if (resume && isCurrentScopeActive()) play(); else render();
+        });
+        youtubeModeButton.addEventListener("click", () => {
+            const hasMedia = settings.youtubePlaylistId || settings.youtubeVideoId;
+            if (!hasMedia) {
+                youtubePlaylistInput.focus();
+                showToast("Paste a YouTube or YouTube Music URL first");
+                return;
+            }
+            settings.youtubeEnabled = true;
+            settings.userWantsPlaying = true;
+            youtubePlaying = true;
+            audio.pause();
+            youtubeFrame.src = currentYouTubeEmbedUrl(true);
+            youtubeFrame.style.display = "block";
+            save(); render(); emit();
+        });
 
         root.querySelectorAll("[data-scope]").forEach((box) => {
             box.checked = !!settings.scopes[box.dataset.scope];
@@ -934,7 +1291,10 @@
             showToast(settings.autoHideInactive ? "Auto-hide when inactive enabled" : "Auto-hide disabled (Always visible)");
         });
 
-        playButton.addEventListener("click", () => void (audio.paused ? play() : pause()));
+        playButton.addEventListener("click", () => {
+            const currentlyPlaying = settings.youtubeEnabled ? youtubePlaying : !audio.paused;
+            void (currentlyPlaying ? pause() : play());
+        });
 
         settingsButton.addEventListener("click", (e) => {
             e.stopPropagation();
@@ -947,8 +1307,6 @@
             }
         });
 
-        // v2 routes both Solo and Duels to /match/:id, so remember which Lobby
-        // card launched the navigation before React replaces the page.
         document.addEventListener("click", (event) => {
             const target = event.target instanceof Element ? event.target : null;
             const button = target?.closest("button");
@@ -1111,7 +1469,7 @@
             save(); render(); emit();
         },
         getState() {
-            return { playing: !audio.paused, volume: audio.volume, context: context(), disabled: settings.disabled, station: currentStream().name, isLooping: audio.loop };
+            return { playing: settings.youtubeEnabled ? youtubePlaying : !audio.paused, volume: audio.volume, context: context(), disabled: settings.disabled, station: currentStream().name, isLooping: audio.loop };
         }
     };
 
