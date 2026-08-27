@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GeoDuels Lofi / Chill Player (with Custom MP3)
 // @namespace    https://geoduels.io/
-// @version      3.4.1
+// @version      3.4.3
 // @description  Modern music player for GeoDuels with stable Lobby detection, 3 startup playback modes, Ranked & Party detection, Custom MP3 Upload (with loop), and glass UI.
 // @match        https://geoduels.io/*
 // @match        https://*.geoduels.io/*
@@ -169,6 +169,15 @@
     let root, playButton, settingsButton, minimizeButton, panel, volumeSlider, autoHideInput, streamSelect, fileInput, deleteBtn;
     let expanded = false;
     let pendingAutoplay = false;
+    let launchContext = null;
+
+    try {
+        const rememberedLaunchContext = sessionStorage.getItem("geoduels-lofi-launch-context");
+        if (["single", "rankduel", "partyduel"].includes(rememberedLaunchContext)) {
+            launchContext = rememberedLaunchContext;
+        }
+    } catch (_) {}
+
 
     function save() {
         localStorage.setItem(KEY, JSON.stringify(settings));
@@ -213,48 +222,52 @@
     }
 
     function context() {
-        const path = location.pathname.toLowerCase();
+        const path = (location.pathname || "/").toLowerCase().replace(/\/$/, "") || "/";
         const search = location.search.toLowerCase();
-        const nextRoute = (window.__NEXT_DATA__?.page || "").toLowerCase();
+        const nextRoute = String(window.__NEXT_DATA__?.page || "").toLowerCase();
+        const bodyText = document.body?.innerText?.toLowerCase() || "";
 
-        if (
-            path.includes("/party") ||
-            path.includes("/room") ||
-            path.includes("/custom") ||
-            search.includes("party") ||
-            search.includes("room") ||
-            nextRoute.includes("/party") ||
-            nextRoute.includes("/room")
-        ) {
+        // v2 uses real Next.js routes. Route state is authoritative during
+        // hydration; transient React DOM must not classify gameplay as Lobby.
+        if (path === "/party" || path.startsWith("/party/") || path === "/room" ||
+            path.startsWith("/room/") || search.includes("party") || search.includes("room") ||
+            nextRoute.includes("/party") || nextRoute.includes("/room")) {
+            launchContext = "partyduel";
             return "partyduel";
         }
 
-        if (
-            path.startsWith("/single") ||
-            path.includes("/singleplayer") ||
-            path.includes("/practice") ||
-            search.includes("single") ||
-            nextRoute.includes("/single") ||
-            document.querySelector('[data-testid="singleplayer-ui"], [data-mode="singleplayer"]')
-        ) {
+        if (path === "/single" || path.startsWith("/single/") || path.includes("/singleplayer") ||
+            path.includes("/practice") || search.includes("single") || nextRoute.includes("/single") ||
+            document.querySelector('[data-testid="singleplayer-ui"], [data-mode="singleplayer"]')) {
             return "single";
         }
 
-        const isMatchPath = /^\/(match|matches|game|duel|ranked)(\/|$)/i.test(path) ||
-                            nextRoute.includes("/match") ||
-                            nextRoute.includes("/duel");
+        const isMatchPath = path === "/match" || path.startsWith("/match/") ||
+            /^\/(matches|game|duel|ranked)(\/|$)/i.test(path) ||
+            nextRoute.includes("/match") || nextRoute.includes("/duel");
 
-        // Resolve match context from the route first. React can temporarily
-        // render party/room/map elements while the Lobby is hydrating; those
-        // elements must not override the actual route and hide the player.
         if (isMatchPath) {
-            const isPartyMatch = document.querySelector('[data-mode="party"], [data-testid="party-badge"], [data-testid="party-match"]') ||
-                                 (document.body && /party duel|custom match|2v2 duel/i.test(document.body.innerText));
+            // Solo and Duels share /match/:id in v2. The launch click is the
+            // only reliable signal before the first websocket snapshot arrives.
+            if (launchContext) return launchContext;
+
+            const isPartyMatch = document.querySelector('[data-mode="party"], [data-mode="team_duel"], [data-testid="party-badge"], [data-testid="party-match"]') ||
+                /party duel|custom match|team duel|2v2 duel/i.test(bodyText);
             if (isPartyMatch) return "partyduel";
+
+            const isSoloMatch = document.querySelector('[data-mode="singleplayer"], [data-testid="singleplayer-ui"]') ||
+                /singleplayer|solo game|play solo/i.test(bodyText);
+            if (isSoloMatch) return "single";
+
+            // An unresolved /match page is gameplay, never Lobby.
             return "rankduel";
         }
 
         return "lobby";
+    }
+
+    function isCurrentScopeActive() {
+        return !!settings.scopes[context()];
     }
 
     function suspendAudio() {
@@ -262,6 +275,16 @@
         pendingAutoplay = false;
         render();
         emit();
+    }
+
+    let contextUpdateTimer = 0;
+
+    function scheduleContextUpdate() {
+        if (contextUpdateTimer) return;
+        contextUpdateTimer = requestAnimationFrame(() => {
+            contextUpdateTimer = 0;
+            updateContext();
+        });
     }
 
     function updateContext() {
@@ -284,9 +307,11 @@
         }
 
         if (!isScopeActive) {
+            // Do not let a rejected autoplay promise resurrect audio after
+            // navigating to a context whose checkbox is off.
+            pendingAutoplay = false;
             if (!audio.paused) {
                 audio.pause();
-                pendingAutoplay = false;
                 render();
                 emit();
             }
@@ -326,7 +351,12 @@
     }
 
     function play() {
-        if (settings.disabled) return Promise.resolve(false);
+        if (settings.disabled || !isCurrentScopeActive()) {
+            audio.pause();
+            pendingAutoplay = false;
+            render();
+            return Promise.resolve(false);
+        }
         settings.userWantsPlaying = true;
         save();
 
@@ -377,7 +407,7 @@
         audio.loop = !!stream.isCustom;
         audio.src = stream.url;
 
-        if (settings.userWantsPlaying) {
+        if (settings.userWantsPlaying && isCurrentScopeActive()) {
             play();
         } else {
             render();
@@ -839,6 +869,9 @@
             <button class="gdl-shutdown-btn" type="button">Shutdown App</button>
         </div>`;
 
+        // Wait for the first stable context evaluation so v2 hydration cannot
+        // show the player for one frame and then hide it.
+        root.hidden = true;
         document.body.append(root);
 
         playButton = root.querySelector(".gdl-play");
@@ -914,6 +947,26 @@
             }
         });
 
+        // v2 routes both Solo and Duels to /match/:id, so remember which Lobby
+        // card launched the navigation before React replaces the page.
+        document.addEventListener("click", (event) => {
+            const target = event.target instanceof Element ? event.target : null;
+            const button = target?.closest("button");
+            if (!button || root.contains(button)) return;
+            const card = button.closest('[class*="lobby-feature-card"]');
+            const label = `${card?.innerText || ""} ${button.innerText || ""}`.toLowerCase();
+            if (/singleplayer|solo/.test(label)) {
+                launchContext = "single";
+            } else if (/ranked|duels|duel/.test(label)) {
+                launchContext = "rankduel";
+            } else {
+                return;
+            }
+            try {
+                sessionStorage.setItem("geoduels-lofi-launch-context", launchContext);
+            } catch (_) {}
+        }, true);
+
         minimizeButton.addEventListener("click", () => {
             settings.uiHidden = true;
             togglePanel(false);
@@ -977,8 +1030,9 @@
 
         render();
 
-        new MutationObserver(updateContext).observe(document.documentElement, { childList: true, subtree: true });
-        addEventListener("popstate", updateContext);
+        new MutationObserver(scheduleContextUpdate).observe(document.documentElement, { childList: true, subtree: true });
+        addEventListener("popstate", scheduleContextUpdate);
+        addEventListener("hashchange", scheduleContextUpdate);
 
         updateContext();
     }
