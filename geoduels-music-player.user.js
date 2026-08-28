@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GeoDuels Lofi / Chill Player (with Custom MP3)
 // @namespace    https://geoduels.io/
-// @version      3.9.4
+// @version      4.4.5
 // @description  Modern music player for GeoDuels with stable Lobby detection, startup playback modes, Ranked and Party detection, custom MP3 upload with looping, and a glass UI.
 // @match        https://geoduels.io/*
 // @match        https://*.geoduels.io/*
@@ -46,7 +46,19 @@
         youtubeMediaType: "playlist",
         youtubeEnabled: false,
         externalAudioUrl: "",
-        externalAudioTitle: ""
+        externalAudioTitle: "",
+        advancedSettingsEnabled: false,
+        advancedModes: {
+            lobby: { behavior: "inherit", source: "basic" },
+            single: { behavior: "inherit", source: "basic" },
+            rankduel: { behavior: "inherit", source: "basic" },
+            partyduel: { behavior: "inherit", source: "basic" }
+        },
+        youtubeMemoryEnabled: true,
+        youtubeProgressMemory: true,
+        youtubePlaylistMemory: true,
+        youtubeAutoResume: true,
+        youtubeMemory: {}
     };
 
     function parse(raw) {
@@ -86,8 +98,17 @@
         youtubeMediaType: saved.youtubeMediaType === "video" ? "video" : defaults.youtubeMediaType,
         youtubeEnabled: typeof saved.youtubeEnabled === "boolean" ? saved.youtubeEnabled : defaults.youtubeEnabled,
         externalAudioUrl: typeof saved.externalAudioUrl === "string" ? saved.externalAudioUrl : defaults.externalAudioUrl,
-        externalAudioTitle: typeof saved.externalAudioTitle === "string" ? saved.externalAudioTitle : defaults.externalAudioTitle
+        externalAudioTitle: typeof saved.externalAudioTitle === "string" ? saved.externalAudioTitle : defaults.externalAudioTitle,
+        advancedSettingsEnabled: typeof saved.advancedSettingsEnabled === "boolean" ? saved.advancedSettingsEnabled : defaults.advancedSettingsEnabled,
+        advancedModes: Object.fromEntries(Object.keys(defaults.advancedModes).map((mode) => [mode, { ...defaults.advancedModes[mode], ...(saved.advancedModes?.[mode] || {}) }])),
+        youtubeMemoryEnabled: typeof saved.youtubeMemoryEnabled === "boolean" ? saved.youtubeMemoryEnabled : defaults.youtubeMemoryEnabled,
+        youtubeProgressMemory: typeof saved.youtubeProgressMemory === "boolean" ? saved.youtubeProgressMemory : defaults.youtubeProgressMemory,
+        youtubePlaylistMemory: typeof saved.youtubePlaylistMemory === "boolean" ? saved.youtubePlaylistMemory : defaults.youtubePlaylistMemory,
+        youtubeAutoResume: typeof saved.youtubeAutoResume === "boolean" ? saved.youtubeAutoResume : defaults.youtubeAutoResume,
+        youtubeMemory: saved.youtubeMemory && typeof saved.youtubeMemory === "object" ? saved.youtubeMemory : {}
     };
+
+    settings.uiHidden = false;
 
     function openDB() {
         return new Promise((resolve, reject) => {
@@ -185,9 +206,19 @@
     let youtubePlaylistInput = null;
     let youtubeEnabledInput = null;
     let youtubePlaying = false;
+    let youtubeLastPlaybackCommand = "";
+    let youtubeLastPlaybackCommandAt = 0;
+    let youtubePlaybackCommandTimer = 0;
+    let youtubeMemorySuppressed = false;
+    let youtubeCurrentTime = 0;
+    let youtubePlaylistIndex = 0;
+    let youtubeMemoryTimer = 0;
     let youtubeEmbedButton = null;
     let mp3ModeButton = null;
+    let advancedEnabledInput = null;
+    let advancedPanel = null;
     let youtubeModeButton = null;
+    let nowPlayingInfo = null;
     let lastContext = null;
     let returnToLobbyState = null;
     try {
@@ -252,10 +283,51 @@
         if (audio.src !== stream.url) audio.src = stream.url;
     }
 
+    function youtubeMemoryKey() { return `${settings.youtubeMediaType}:${settings.youtubeMediaType === "video" ? settings.youtubeVideoId : settings.youtubePlaylistId}`; }
+    function currentYouTubeMemory() { return settings.youtubeMemory[youtubeMemoryKey()] || {}; }
     function currentYouTubeEmbedUrl(autoplay) {
         const type = settings.youtubeMediaType === "video" ? "video" : "playlist";
         const id = type === "video" ? settings.youtubeVideoId : settings.youtubePlaylistId;
-        return id ? youtubeEmbedUrl(type, id, autoplay) : "about:blank";
+        if (!id) return "about:blank";
+        const memory = settings.youtubeMemoryEnabled && settings.youtubeAutoResume ? currentYouTubeMemory() : {};
+        const url = new URL(youtubeEmbedUrl(type, id, autoplay));
+        if (settings.youtubeProgressMemory && Number(memory.time) > 0) url.searchParams.set("start", String(Math.floor(memory.time)));
+        if (type === "playlist" && settings.youtubePlaylistMemory && Number.isFinite(Number(memory.index))) {
+            const savedIndex = memory.indexBase === 1 ? Math.floor(Number(memory.index)) : Math.floor(Number(memory.index)) + 1;
+            if (savedIndex > 0) url.searchParams.set("index", String(savedIndex));
+        }
+        return url.href;
+    }
+
+    function youtubeFrameMatchesSource(url) {
+        if (!youtubeFrame?.src || !url) return false;
+        try {
+            const current = new URL(youtubeFrame.src);
+            const desired = new URL(url, location.href);
+            ["start", "index"].forEach((key) => { current.searchParams.delete(key); desired.searchParams.delete(key); });
+            return current.href === desired.href;
+        } catch (_) {
+            return youtubeFrame.src === url;
+        }
+    }
+    function requestYouTubeMemory() {
+        if (!settings.youtubeEnabled || !settings.youtubeMemoryEnabled) return;
+        sendYouTubeCommand("getCurrentTime");
+        sendYouTubeCommand("getPlaylistIndex");
+    }
+
+    function saveYouTubeMemory() {
+        if (!settings.youtubeEnabled || !settings.youtubeMemoryEnabled) return;
+        const key = youtubeMemoryKey();
+        const memory = { ...(settings.youtubeMemory[key] || {}) };
+        if (settings.youtubeProgressMemory && Number.isFinite(youtubeCurrentTime)) memory.time = Math.max(0, youtubeCurrentTime);
+        if (settings.youtubePlaylistMemory && Number.isFinite(youtubePlaylistIndex)) {
+            memory.index = Math.max(1, Math.floor(youtubePlaylistIndex) + 1);
+            memory.indexBase = 1;
+        }
+        memory.updatedAt = Date.now();
+        settings.youtubeMemory[key] = memory;
+        save();
     }
 
     function setYouTubePlaylist(value, autoplay = true) {
@@ -293,6 +365,8 @@
         youtubePlaying = false;
         if (youtubeFrame) {
             sendYouTubeCommand("stopVideo");
+            youtubeLastPlaybackCommand = "";
+            youtubeLastPlaybackCommandAt = 0;
             youtubeFrame.src = "about:blank";
             youtubeFrame.style.display = "none";
         }
@@ -302,16 +376,41 @@
         emit();
     }
 
+    function youtubeTargetOrigin() {
+        try {
+            const origin = new URL(youtubeFrame?.src || "").origin;
+            return origin === "null" ? "https://www.youtube.com" : origin;
+        } catch (_) {
+            return "https://www.youtube.com";
+        }
+    }
     function sendYouTubeCommand(func, args = []) {
         if (!youtubeFrame?.contentWindow) return;
-        youtubeFrame.contentWindow.postMessage(JSON.stringify({ event: "command", func, args }), "*");
+        if (func === "playVideo" || func === "pauseVideo") {
+            const now = Date.now();
+            if (youtubeLastPlaybackCommand === func && now - youtubeLastPlaybackCommandAt < 1200) return;
+            youtubeLastPlaybackCommand = func;
+            youtubeLastPlaybackCommandAt = now;
+        }
+        youtubeFrame.contentWindow.postMessage(JSON.stringify({ event: "command", func, args }), youtubeTargetOrigin());
+    }
+    function requestYouTubePlayback(shouldPlay) {
+        if (!youtubeFrame?.contentWindow || !settings.youtubeEnabled) return;
+        if (youtubePlaybackCommandTimer) clearTimeout(youtubePlaybackCommandTimer);
+        youtubePlaybackCommandTimer = setTimeout(() => {
+            youtubePlaybackCommandTimer = 0;
+            if (settings.youtubeEnabled && settings.userWantsPlaying === shouldPlay) {
+                sendYouTubeCommand(shouldPlay ? "playVideo" : "pauseVideo");
+            }
+        }, 180);
     }
 
     function announceYouTubePlayer() {
         if (!youtubeFrame?.contentWindow) return;
         const target = youtubeFrame.contentWindow;
-        target.postMessage(JSON.stringify({ event: "listening", id: "gdl-youtube-player", channel: "gdl" }), "*");
-        target.postMessage(JSON.stringify({ event: "command", func: "addEventListener", args: ["onStateChange"] }), "*");
+        const origin = youtubeTargetOrigin();
+        target.postMessage(JSON.stringify({ event: "listening", id: "gdl-youtube-player", channel: "gdl" }), origin);
+        target.postMessage(JSON.stringify({ event: "command", func: "addEventListener", args: ["onStateChange"] }), origin);
     }
 
     window.addEventListener("message", (event) => {
@@ -319,7 +418,11 @@
         if (!String(event.origin || "").includes("youtube.com")) return;
         try {
             const message = typeof event.data === "string" ? JSON.parse(event.data) : event.data;
-            const stateValue = message?.info?.playerState ?? (message?.event === "onStateChange" ? message.info : undefined);
+            const info = message?.info || {};
+            if (Number.isFinite(Number(info.currentTime))) youtubeCurrentTime = Number(info.currentTime);
+            if (Number.isFinite(Number(info.playlistIndex))) youtubePlaylistIndex = Number(info.playlistIndex);
+            if (!youtubeMemorySuppressed && message?.event === "infoDelivery" && (info.currentTime !== undefined || info.playlistIndex !== undefined)) saveYouTubeMemory();
+            const stateValue = info.playerState ?? (message?.event === "onStateChange" ? message.info : undefined);
             if (stateValue === undefined) return;
             const state = Number(stateValue);
             if (state === 1) { youtubePlaying = true; settings.userWantsPlaying = true; }
@@ -375,7 +478,7 @@
         const nextRoute = String(window.__NEXT_DATA__?.page || "").toLowerCase();
         const bodyText = document.body?.innerText?.toLowerCase() || "";
 
-
+        
         if (path === "/party" || path.startsWith("/party/") || path === "/room" ||
             path.startsWith("/room/") || search.includes("party") || search.includes("room") ||
             nextRoute.includes("/party") || nextRoute.includes("/room")) {
@@ -410,8 +513,48 @@
         return "lobby";
     }
 
+    function currentAdvancedMode() {
+        return settings.advancedSettingsEnabled ? settings.advancedModes[context()] : null;
+    }
+
     function isCurrentScopeActive() {
-        return !!settings.scopes[context()];
+        const place = context();
+        const policy = settings.advancedSettingsEnabled ? settings.advancedModes[place] : null;
+        if (policy?.behavior === "off") return false;
+        if (policy?.behavior === "on") return true;
+        if (place === "lobby") return true;
+        return !!settings.scopes[place];
+    }
+
+    function applyAdvancedSource(policy) {
+        if (!policy) return;
+        if (policy.behavior === "off") {
+            settings.userWantsPlaying = false;
+            pendingAutoplay = false;
+            audio.pause();
+            youtubePlaying = false;
+            if (youtubeFrame && settings.youtubeEnabled) {
+                sendYouTubeCommand("stopVideo");
+                youtubeFrame.style.display = "none";
+            }
+            return;
+        }
+        if (policy.source === "youtube" && (settings.youtubePlaylistId || settings.youtubeVideoId) && !settings.youtubeEnabled) {
+            settings.youtubeEnabled = true;
+            youtubePlaying = false;
+            audio.pause();
+            if (youtubeFrame) { youtubeFrame.src = currentYouTubeEmbedUrl(false); youtubeFrame.style.display = "block"; }
+            save();
+        } else if (policy.source === "mp3" && settings.youtubeEnabled) {
+            settings.youtubeEnabled = false;
+            youtubePlaying = false;
+            sendYouTubeCommand("stopVideo");
+            youtubeLastPlaybackCommand = "";
+            youtubeLastPlaybackCommandAt = 0;
+            if (youtubeFrame) { youtubeFrame.src = "about:blank"; youtubeFrame.style.display = "none"; }
+            initializeAudioSource();
+            save();
+        }
     }
 
     function suspendAudio() {
@@ -441,10 +584,19 @@
         }
 
         const place = context();
-        const isScopeActive = !!settings.scopes[place];
+        const policy = settings.advancedSettingsEnabled ? settings.advancedModes[place] : null;
+        const isScopeActive = isCurrentScopeActive();
         const isGameplayContext = place === "single" || place === "rankduel" || place === "partyduel";
 
         if (lastContext === "lobby" && isGameplayContext && !returnToLobbyState) {
+            youtubeMemorySuppressed = false;
+            if (settings.youtubeEnabled && settings.youtubeMemoryEnabled) {
+                requestYouTubeMemory();
+                saveYouTubeMemory();
+                setTimeout(() => {
+                    if (!youtubeMemorySuppressed && settings.youtubeEnabled && settings.youtubeMemoryEnabled) saveYouTubeMemory();
+                }, 250);
+            }
             returnToLobbyState = {
                 userWantsPlaying: settings.userWantsPlaying,
                 streamIndex: settings.streamIndex,
@@ -456,12 +608,13 @@
                 externalAudioTitle: settings.externalAudioTitle,
                 wasPlaying: settings.youtubeEnabled ? youtubePlaying : !audio.paused
             };
-            try {
+                        try {
                 sessionStorage.setItem("geoduels-lofi-return-state", JSON.stringify(returnToLobbyState));
             } catch (_) {}
         }
-
+        applyAdvancedSource(policy);
         if (place === "lobby" && returnToLobbyState) {
+            youtubeMemorySuppressed = false;
             const savedReturnState = returnToLobbyState;
             returnToLobbyState = null;
             try { sessionStorage.removeItem("geoduels-lofi-return-state"); } catch (_) {}
@@ -478,9 +631,16 @@
 
             if (settings.youtubeEnabled && (settings.youtubePlaylistId || settings.youtubeVideoId)) {
                 audio.pause();
-                if (youtubeFrame) {
-                    youtubeFrame.src = currentYouTubeEmbedUrl(youtubePlaying);
-                    youtubeFrame.style.display = youtubePlaying ? "block" : "none";
+                if (youtubeFrame && youtubePlaying) {
+                    const returnEmbedUrl = currentYouTubeEmbedUrl(true);
+                    if (!youtubeFrameMatchesSource(returnEmbedUrl)) youtubeFrame.src = returnEmbedUrl;
+                    youtubeFrame.style.display = "block";
+                    requestYouTubePlayback(true);
+                } else if (youtubeFrame) {
+                    sendYouTubeCommand("stopVideo");
+                    youtubeLastPlaybackCommand = "";
+                    youtubeLastPlaybackCommandAt = 0;
+                    youtubeFrame.style.display = "none";
                 }
             } else {
                 initializeAudioSource();
@@ -495,7 +655,7 @@
 
         lastContext = place;
 
-        const shouldHide = settings.uiHidden || (!isScopeActive && settings.autoHideInactive);
+        const shouldHide = settings.uiHidden || (place !== "lobby" && !isScopeActive && settings.autoHideInactive);
         root.hidden = shouldHide;
 
         if (shouldHide) {
@@ -503,10 +663,11 @@
         }
 
         if (!isScopeActive) {
+            youtubeMemorySuppressed = true;
             pendingAutoplay = false;
             youtubePlaying = false;
             if (youtubeFrame && settings.youtubeEnabled) {
-                sendYouTubeCommand("stopVideo");
+                sendYouTubeCommand("pauseVideo");
                 youtubeFrame.style.display = "none";
             }
             if (!audio.paused) {
@@ -520,7 +681,7 @@
                     youtubePlaying = true;
                     if (youtubeFrame) {
                         const embedUrl = currentYouTubeEmbedUrl(true);
-                        if (youtubeFrame.src !== embedUrl) youtubeFrame.src = embedUrl;
+                        if (!youtubeFrameMatchesSource(embedUrl)) youtubeFrame.src = embedUrl;
                         youtubeFrame.style.display = "block";
                     }
                     audio.pause();
@@ -550,10 +711,15 @@
         }
     }
 
+    youtubeMemoryTimer = window.setInterval(() => {
+        if (settings.youtubeEnabled && settings.youtubeMemoryEnabled) requestYouTubeMemory();
+    }, 3000);
+
     function render() {
         if (!root) return;
         const isPlaying = settings.youtubeEnabled ? youtubePlaying : !audio.paused;
         playButton.classList.toggle("is-playing", isPlaying);
+        if (nowPlayingInfo) nowPlayingInfo.textContent = settings.youtubeEnabled ? (settings.youtubeMediaType === "video" ? "YouTube / YouTube Music video" : "YouTube / YouTube Music playlist") + (youtubePlaying ? " · Playing" : " · Paused") : (settings.externalAudioTitle || currentStream().name || "MP3 / Radio") + (audio.paused ? " · Paused" : " · Playing");
         if (mp3ModeButton) mp3ModeButton.classList.toggle("is-active", !settings.youtubeEnabled);
         if (youtubeModeButton) youtubeModeButton.classList.toggle("is-active", settings.youtubeEnabled);
         playButton.setAttribute("aria-label", isPlaying ? "Pause" : "Play");
@@ -576,9 +742,9 @@
             audio.pause();
             if (youtubeFrame) {
                 const embedUrl = currentYouTubeEmbedUrl(true);
-                if (youtubeFrame.src !== embedUrl) youtubeFrame.src = embedUrl;
+                if (!youtubeFrameMatchesSource(embedUrl)) youtubeFrame.src = embedUrl;
                 youtubeFrame.style.display = "block";
-                setTimeout(() => sendYouTubeCommand("playVideo"), 250);
+                requestYouTubePlayback(true);
             }
             save();
             render();
@@ -625,7 +791,7 @@
         save();
         audio.pause();
         youtubePlaying = false;
-        if (youtubeFrame && settings.youtubeEnabled) sendYouTubeCommand("pauseVideo");
+        if (youtubeFrame && settings.youtubeEnabled) requestYouTubePlayback(false);
         if (settings.youtubeEnabled && youtubeFrame) {
             youtubeFrame.style.display = "block";
         }
@@ -647,6 +813,8 @@
         youtubePlaying = false;
         if (youtubeFrame) {
             sendYouTubeCommand("stopVideo");
+            youtubeLastPlaybackCommand = "";
+            youtubeLastPlaybackCommandAt = 0;
             youtubeFrame.src = "about:blank";
             youtubeFrame.style.display = "none";
         }
@@ -670,6 +838,8 @@
         youtubePlaying = false;
         if (youtubeFrame) {
             sendYouTubeCommand("stopVideo");
+            youtubeLastPlaybackCommand = "";
+            youtubeLastPlaybackCommandAt = 0;
             youtubeFrame.src = "about:blank";
             youtubeFrame.style.display = "none";
         }
@@ -829,9 +999,9 @@
                 position: absolute;
                 top: 44px;
                 right: 0;
-                width: 230px;
-                padding: 12px;
-                max-height: min(72vh, 560px);
+                width: min(560px, calc(100vw - 24px));
+                padding: 14px;
+                max-height: min(78vh, 620px);
                 overflow-y: auto;
                 overscroll-behavior: contain;
                 scrollbar-width: thin;
@@ -852,6 +1022,42 @@
                 pointer-events: auto;
             }
 
+            #geoduels-lofi-player .gdl-tabs { display:flex; gap:5px; margin:-2px 0 12px; padding-bottom:8px; border-bottom:1px solid rgba(255,255,255,.1); overflow-x:auto; }
+            #geoduels-lofi-player .gdl-tab { flex:1; min-width:78px; border:1px solid rgba(255,255,255,.12); border-radius:8px; padding:7px 8px; color:#94a3b8; background:rgba(255,255,255,.05); font-size:10px; cursor:pointer; white-space:nowrap; }
+            #geoduels-lofi-player .gdl-tab.is-active { color:#fff; border-color:#34d399; background:rgba(16,185,129,.25); }
+            #geoduels-lofi-player .gdl-panel[data-active-tab="now"] > :not(.gdl-tabs):not(.gdl-now-playing) { display:none; }
+            #geoduels-lofi-player .gdl-panel[data-active-tab="memory"] > :not(.gdl-tabs):not(.gdl-memory-basic) { display:none; }
+            #geoduels-lofi-player .gdl-panel[data-active-tab="advanced"] > :not(.gdl-tabs):not(.gdl-advanced-toggle):not(.gdl-advanced-open) { display:none; }
+            #geoduels-lofi-player .gdl-panel[data-active-tab="basic"] > .gdl-now-playing,
+            #geoduels-lofi-player .gdl-panel[data-active-tab="memory"] > .gdl-now-playing,
+            #geoduels-lofi-player .gdl-panel[data-active-tab="advanced"] > .gdl-now-playing { display:none; }
+
+            #geoduels-lofi-player .gdl-panel {
+                width: min(286px, calc(100vw - 24px));
+                padding: 14px;
+                max-height: min(78vh, 620px);
+                border-radius: 12px;
+            }
+            #geoduels-lofi-player .gdl-tabs { gap: 4px; margin: -2px 0 10px; padding-bottom: 7px; }
+            #geoduels-lofi-player .gdl-tab { min-width: 0; padding: 6px 4px; border-radius: 6px; font-size: 9px; }
+            #geoduels-lofi-player .gdl-label { margin: 8px 0 4px; font-size: 10px; }
+            #geoduels-lofi-player select { border-radius: 8px; padding: 7px 8px; font-size: 11px; }
+            #geoduels-lofi-player .gdl-upload-row { gap: 6px; margin-top: 6px; }
+            #geoduels-lofi-player .gdl-custom-btn { min-height: 31px; padding: 6px 8px; border-radius: 7px; font-size: 10px; }
+            #geoduels-lofi-player .gdl-del-btn { min-height: 31px; padding: 0 8px; border-radius: 7px; }
+            #geoduels-lofi-player .gdl-scopes { gap: 5px; }
+            #geoduels-lofi-player .gdl-chip span { padding: 7px 0; border-radius: 7px; font-size: 10.5px; }
+            #geoduels-lofi-player .gdl-startup-modes { gap: 5px; }
+            #geoduels-lofi-player .gdl-startup-modes .gdl-chip span { padding: 7px 0; }
+            #geoduels-lofi-player .gdl-toggle-row { margin: 9px 0 5px; }
+            #geoduels-lofi-player .gdl-toggle-label { font-size: 10.5px; }
+            #geoduels-lofi-player .gdl-memory-grid { gap: 5px; }
+            #geoduels-lofi-player .gdl-memory-option span { padding: 7px 0; border-radius: 7px; font-size: 10px; }
+            #geoduels-lofi-player .gdl-source-row { gap: 5px; }
+            #geoduels-lofi-player .gdl-source-btn { padding: 7px 4px; border-radius: 7px; font-size: 10px; }
+            #geoduels-lofi-player .gdl-yt-help { font-size: 9px; line-height: 1.35; }
+            #geoduels-lofi-player .gdl-yt-input { font-size: 10px; }
+            #geoduels-lofi-player .gdl-yt-btn { padding: 0 9px; font-size: 10px; }
             #geoduels-lofi-player .gdl-label {
                 display: block;
                 margin: 8px 0 4px;
@@ -905,13 +1111,35 @@
                 padding: 5px 7px;
                 cursor: pointer;
             }
-
-            #geoduels-lofi-player .gdl-source-row { display: flex; flex-direction: column; gap: 6px; margin-top: 7px; }
+            
+            #geoduels-lofi-player .gdl-advanced-toggle { display:flex; align-items:center; justify-content:space-between; margin-top:10px; }
+            #geoduels-lofi-player .gdl-advanced-open { width:100%; margin-top:6px; border:1px solid rgba(52,211,153,.35); border-radius:7px; padding:6px 8px; color:#d1fae5; background:rgba(16,185,129,.12); font-size:10px; cursor:pointer; }
+            #geoduels-lofi-player .gdl-advanced-open:disabled { opacity:.45; cursor:not-allowed; }
+            .gdl-advanced-panel { display:none; position:fixed; right:20px; top:50%; transform:translateY(-50%); width:min(520px, calc(100vw - 40px)); max-height:80vh; overflow-y:auto; padding:16px; z-index:2147483647; border:1px solid rgba(52,211,153,.4); border-radius:14px; color:#f1f5f9; background:rgba(13,20,30,.98); box-shadow:0 20px 70px rgba(0,0,0,.72); }
+            .gdl-advanced-panel.is-open { display:block; }
+            .gdl-advanced-head { display:flex; justify-content:space-between; align-items:center; font-size:13px; }
+            .gdl-advanced-close { border:0; border-radius:6px; padding:5px 8px; color:#cbd5e1; background:rgba(255,255,255,.1); cursor:pointer; }
+            .gdl-advanced-note { margin:7px 0 12px; color:#94a3b8; font-size:10px; }
+            .gdl-memory-grid { display:grid; grid-template-columns:repeat(2, minmax(0, 1fr)); gap:6px; margin-top:6px; }
+            .gdl-memory-option { position:relative; cursor:pointer; flex:1; }
+            .gdl-memory-option input { position:absolute; opacity:0; pointer-events:none; }
+            .gdl-memory-option span { display:block; text-align:center; padding:5.5px 0; font-size:10.5px; font-weight:500; color:#94a3b8; background:rgba(255,255,255,.05); border:1px solid rgba(255,255,255,.08); border-radius:6px; transition:all .15s ease; }
+            .gdl-memory-option input:checked + span { background:rgba(16,185,129,.2); border-color:rgba(52,211,153,.45); color:#34d399; font-weight:600; }
+            .gdl-memory-option:hover span { background:rgba(255,255,255,.1); color:#fff; }
+            .gdl-advanced-grid { display:grid; gap:8px; }
+            .gdl-advanced-row { display:grid; grid-template-columns:70px 1fr 1.2fr; gap:7px; align-items:center; }
+            .gdl-advanced-row > span { font-size:11px; font-weight:600; }
+            .gdl-advanced-row select { min-width:0; }
+            #geoduels-lofi-player .gdl-source-row { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:6px; margin-top:7px; }
             #geoduels-lofi-player .gdl-panel::-webkit-scrollbar { width: 5px; }
             #geoduels-lofi-player .gdl-panel::-webkit-scrollbar-thumb { background: rgba(148,163,184,.45); border-radius: 5px; }
-            #geoduels-lofi-player .gdl-source-btn { flex: 1; border: 1px solid rgba(255,255,255,.14); border-radius: 7px; padding: 6px 7px; color: #dbeafe; background: rgba(255,255,255,.06); font-size: 10px; cursor: pointer; }
-            #geoduels-lofi-player .gdl-source-btn:hover { border-color: #34d399; background: rgba(52,211,153,.12); }
-            #geoduels-lofi-player .gdl-source-btn.is-active { border-color: #34d399; color: #fff; background: rgba(16,185,129,.28); box-shadow: 0 0 0 1px rgba(52,211,153,.25) inset; }
+            #geoduels-lofi-player .gdl-source-btn { min-height:0; border:1px solid rgba(255,255,255,.08); border-radius:6px; padding:5.5px 0; color:#94a3b8; background:rgba(255,255,255,.05); font-size:10.5px; font-weight:500; cursor:pointer; text-align:center; transition:all .15s ease; }
+            #geoduels-lofi-player .gdl-source-btn:hover { background:rgba(255,255,255,.1); color:#fff; }
+            #geoduels-lofi-player .gdl-source-btn.is-active { background:rgba(16,185,129,.2); border-color:rgba(52,211,153,.45); color:#34d399; font-weight:600; box-shadow:none; }
+            #geoduels-lofi-player .gdl-now-playing { display:flex; flex-direction:column; gap:8px; padding:10px; border:1px solid rgba(255,255,255,.1); border-radius:10px; background:rgba(255,255,255,.04); }
+            #geoduels-lofi-player .gdl-now-title { color:#94a3b8; font-size:9px; text-transform:uppercase; letter-spacing:.6px; }
+            #geoduels-lofi-player .gdl-now-info { color:#f8fafc; font-size:12px; font-weight:600; }
+            #geoduels-lofi-player[data-now-tab="true"] .gdl-yt-frame { display:block; }
             #geoduels-lofi-player .gdl-yt-frame {
                 display: none;
                 width: 100%;
@@ -1109,6 +1337,40 @@
                 border-color: #ef4444;
                 color: #fff;
             }
+            #geoduels-lofi-player .gdl-panel { width:min(286px,calc(100vw - 24px)); padding:14px; border-radius:12px; }
+            #geoduels-lofi-player .gdl-tabs { gap:4px; margin:-2px 0 10px; padding-bottom:7px; }
+            #geoduels-lofi-player .gdl-tab { min-width:0; padding:6px 4px; border-radius:6px; font-size:9px; }
+            #geoduels-lofi-player .gdl-label { margin:8px 0 4px; font-size:10px; }
+            #geoduels-lofi-player select { border-radius:8px; padding:7px 8px; font-size:11px; }
+            #geoduels-lofi-player .gdl-upload-row { gap:6px; margin-top:6px; }
+            #geoduels-lofi-player .gdl-custom-btn { min-height:31px; padding:6px 8px; border-radius:7px; font-size:10px; }
+            #geoduels-lofi-player .gdl-del-btn { min-height:31px; padding:0 8px; border-radius:7px; }
+            #geoduels-lofi-player .gdl-scopes { gap:5px; }
+            #geoduels-lofi-player .gdl-chip span { padding:7px 0; border-radius:7px; font-size:10.5px; }
+            #geoduels-lofi-player .gdl-startup-modes { gap:5px; }
+            #geoduels-lofi-player .gdl-startup-modes .gdl-chip span { padding:7px 0; }
+            #geoduels-lofi-player .gdl-toggle-row { margin:9px 0 5px; }
+            #geoduels-lofi-player .gdl-memory-grid { gap:5px; }
+            #geoduels-lofi-player .gdl-memory-option span { padding:7px 0; border-radius:7px; font-size:10px; }
+            #geoduels-lofi-player .gdl-source-row { gap:5px; }
+            #geoduels-lofi-player .gdl-source-btn { padding:7px 4px; border-radius:7px; font-size:10px; }
+            #geoduels-lofi-player .gdl-yt-help { font-size:9px; line-height:1.35; }
+            #geoduels-lofi-player .gdl-yt-input { font-size:10px; }
+            #geoduels-lofi-player .gdl-yt-btn { padding:0 9px; font-size:10px; }
+            #geoduels-lofi-player { font-family:var(--gd-font-family-body, var(--font-body, "Outfit")), system-ui, sans-serif; font-size:12px; font-synthesis:none; text-rendering:optimizeLegibility; }
+            #geoduels-lofi-player button, #geoduels-lofi-player input, #geoduels-lofi-player select { font-family:inherit; font-synthesis:none; }
+            #geoduels-lofi-player .gdl-tabs .gdl-tab { font-size:12px; font-weight:400; letter-spacing:.075em; }
+            #geoduels-lofi-player .gdl-label { font-size:12px; font-weight:500; letter-spacing:.075em; }
+            #geoduels-lofi-player select { font-size:14px; line-height:20px; font-weight:400; }
+            #geoduels-lofi-player .gdl-custom-btn, #geoduels-lofi-player .gdl-del-btn { font-size:12px; font-weight:500; }
+            #geoduels-lofi-player .gdl-chip span, #geoduels-lofi-player .gdl-source-btn, #geoduels-lofi-player .gdl-memory-option span { font-size:12px; font-weight:400; letter-spacing:0; }
+            #geoduels-lofi-player .gdl-chip input:checked + span, #geoduels-lofi-player .gdl-source-btn.is-active, #geoduels-lofi-player .gdl-memory-option input:checked + span { font-weight:500; }
+            #geoduels-lofi-player .gdl-toggle-label { font-size:14px; line-height:20px; font-weight:400; }
+            #geoduels-lofi-player .gdl-yt-help { font-size:12px; line-height:1.5; }
+            #geoduels-lofi-player .gdl-yt-input { font-size:14px; font-weight:400; }
+            #geoduels-lofi-player .gdl-yt-btn { font-size:12px; font-weight:500; }
+            #geoduels-lofi-player .gdl-tabs { display:flex; width:100%; min-width:0; gap:3px; overflow:hidden; }
+            #geoduels-lofi-player .gdl-tabs .gdl-tab { flex:1 1 0; min-width:0; width:0; max-width:none; overflow:hidden; padding:6px 2px; font-size:9px; line-height:12px; letter-spacing:0; white-space:nowrap; text-overflow:clip; }
         </style>
         <div class="gdl-bar">
             <button class="gdl-btn gdl-play is-playing" type="button" aria-label="Play">
@@ -1122,7 +1384,13 @@
                 <svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round"><line x1="5" y1="12" x2="19" y2="12"></line></svg>
             </button>
         </div>
-        <div class="gdl-panel">
+        <div class="gdl-panel" data-active-tab="basic">
+            <div class="gdl-tabs" role="tablist">
+                <button class="gdl-tab is-active" type="button" data-settings-tab="basic">Basic</button>
+                <button class="gdl-tab" type="button" data-settings-tab="now">Now Playing</button>
+                <button class="gdl-tab" type="button" data-settings-tab="memory">Memory</button>
+                <button class="gdl-tab" type="button" data-settings-tab="advanced">Advanced</button>
+            </div>
             <label class="gdl-label">Audio Track / Station</label>
             <select class="gdl-station-select"></select>
 
@@ -1142,7 +1410,33 @@
                 <button class="gdl-source-btn gdl-mp3-mode" type="button">Use MP3 / Radio</button>
                 <button class="gdl-source-btn gdl-youtube-mode" type="button">Use YouTube / YouTube Music</button>
             </div>
-            <iframe class="gdl-yt-frame" title="YouTube video or playlist" allow="autoplay; encrypted-media; picture-in-picture" allowfullscreen></iframe>
+            <div class="gdl-memory-basic">
+                <label class="gdl-label">YouTube Playback Memory</label>
+                <div class="gdl-memory-grid">
+                    <label class="gdl-memory-option"><input data-memory-setting="youtubeMemoryEnabled" type="checkbox"><span>Playback Memory</span></label>
+                    <label class="gdl-memory-option"><input data-memory-setting="youtubeProgressMemory" type="checkbox"><span>Playback Time</span></label>
+                    <label class="gdl-memory-option"><input data-memory-setting="youtubePlaylistMemory" type="checkbox"><span>Playlist Track</span></label>
+                    <label class="gdl-memory-option"><input data-memory-setting="youtubeAutoResume" type="checkbox"><span>Auto Resume</span></label>
+                </div>
+            </div>
+            <div class="gdl-now-playing">
+                <div class="gdl-now-title">Now Playing</div>
+                <div class="gdl-now-info">Nothing playing</div>
+                <iframe class="gdl-yt-frame" title="YouTube video or playlist" allow="autoplay; encrypted-media; picture-in-picture" allowfullscreen></iframe>
+            </div>
+
+            <div class="gdl-advanced-toggle">
+                <label class="gdl-toggle-label" for="gdl-advanced-enabled">Enable Advanced Settings</label>
+                <label class="gdl-switch"><input id="gdl-advanced-enabled" class="gdl-advanced-enabled" type="checkbox"><span class="gdl-slider"></span></label>
+            </div>
+            <button class="gdl-advanced-open" type="button">Open Advanced Settings</button>
+            <div class="gdl-advanced-panel">
+                <div class="gdl-advanced-head"><strong>Advanced Settings</strong><button class="gdl-advanced-close" type="button">Close</button></div>
+                <div class="gdl-advanced-note">Choose Inherit Basic, Always Play, or Always Off for each mode.</div>
+                <div class="gdl-advanced-grid">
+                    ${[["lobby","Lobby"],["single","Solo"],["rankduel","Duels"],["partyduel","Party"]].map(([key, label]) => `<div class="gdl-advanced-row"><span>${label}</span><select data-advanced-mode="${key}" data-advanced-field="behavior"><option value="inherit">Inherit Basic</option><option value="on">Always Play</option><option value="off">Always Off</option></select><select data-advanced-mode="${key}" data-advanced-field="source"><option value="basic">Use Basic Source</option><option value="mp3">Use MP3 / Radio</option><option value="youtube">Use YouTube / YouTube Music</option></select></div>`).join("")}
+                </div>
+            </div>
 
             <label class="gdl-label">Play Music In</label>
             <div class="gdl-scopes">
@@ -1181,7 +1475,7 @@
             <button class="gdl-shutdown-btn" type="button">Shutdown App</button>
         </div>`;
 
-        root.hidden = true;
+        root.hidden = false;
         document.body.append(root);
 
         playButton = root.querySelector(".gdl-play");
@@ -1201,6 +1495,10 @@
         youtubeEmbedButton = root.querySelector(".gdl-yt-embed-btn");
         mp3ModeButton = root.querySelector(".gdl-mp3-mode");
         youtubeModeButton = root.querySelector(".gdl-youtube-mode");
+        nowPlayingInfo = root.querySelector(".gdl-now-info");
+        advancedEnabledInput = root.querySelector(".gdl-advanced-enabled");
+        advancedPanel = root.querySelector(".gdl-advanced-panel");
+        if (advancedPanel) document.body.appendChild(advancedPanel);
         if (youtubePlaylistInput) {
             youtubePlaylistInput.value = settings.youtubeMediaType === "video"
                 ? `https://music.youtube.com/watch?v=${settings.youtubeVideoId}`
@@ -1242,6 +1540,22 @@
             initializeAudioSource();
             if (resume && isCurrentScopeActive()) play(); else render();
         });
+        const advancedOpenButton = root.querySelector(".gdl-advanced-open");
+        const advancedCloseButton = advancedPanel?.querySelector(".gdl-advanced-close") || root.querySelector(".gdl-advanced-close");
+        const syncAdvancedUI = () => {
+            if (advancedOpenButton) advancedOpenButton.disabled = !settings.advancedSettingsEnabled;
+            if (advancedPanel) advancedPanel.querySelectorAll("[data-advanced-mode]").forEach((select) => { select.value = settings.advancedModes[select.dataset.advancedMode][select.dataset.advancedField]; });
+        };
+        if (advancedEnabledInput) {
+            advancedEnabledInput.checked = settings.advancedSettingsEnabled;
+            advancedEnabledInput.addEventListener("change", () => { settings.advancedSettingsEnabled = advancedEnabledInput.checked; save(); syncAdvancedUI(); updateContext(); });
+        }
+        if (advancedOpenButton && advancedPanel) advancedOpenButton.addEventListener("click", () => { if (settings.advancedSettingsEnabled) advancedPanel.classList.add("is-open"); });
+        if (advancedCloseButton && advancedPanel) advancedCloseButton.addEventListener("click", () => advancedPanel.classList.remove("is-open"));
+        if (advancedPanel) advancedPanel.querySelectorAll("[data-advanced-mode]").forEach((select) => select.addEventListener("change", () => { const mode = settings.advancedModes[select.dataset.advancedMode]; mode[select.dataset.advancedField] = select.value; save(); updateContext(); }));
+        syncAdvancedUI();
+        root.querySelectorAll("[data-memory-setting]").forEach((input) => { input.checked = !!settings[input.dataset.memorySetting]; input.addEventListener("change", () => { settings[input.dataset.memorySetting] = input.checked; save(); }); });
+
         youtubeModeButton.addEventListener("click", () => {
             const hasMedia = settings.youtubePlaylistId || settings.youtubeVideoId;
             if (!hasMedia) {
@@ -1296,8 +1610,15 @@
             void (currentlyPlaying ? pause() : play());
         });
 
+        root.querySelectorAll("[data-settings-tab]").forEach((tab) => tab.addEventListener("click", () => {
+            const selected = tab.dataset.settingsTab;
+            panel.dataset.activeTab = selected;
+            root.querySelectorAll("[data-settings-tab]").forEach((item) => item.classList.toggle("is-active", item.dataset.settingsTab === selected));
+        }));
+
         settingsButton.addEventListener("click", (e) => {
-            e.stopPropagation();
+            e.preventDefault();
+            e.stopImmediatePropagation();
             togglePanel();
         });
 
