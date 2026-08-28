@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GeoDuels Lofi / Chill Player (with Custom MP3)
 // @namespace    https://geoduels.io/
-// @version      4.4.5
+// @version      4.4.6
 // @description  Modern music player for GeoDuels with stable Lobby detection, startup playback modes, Ranked and Party detection, custom MP3 upload with looping, and a glass UI.
 // @match        https://geoduels.io/*
 // @match        https://*.geoduels.io/*
@@ -1668,12 +1668,29 @@
             emit();
         });
 
-        if (settings.position && Number.isFinite(settings.position.x) && Number.isFinite(settings.position.y) &&
-            settings.position.x >= 0 && settings.position.y >= 0 &&
-            settings.position.x < innerWidth - 40 && settings.position.y < innerHeight - 40) {
+        const constrainRootPosition = (persist = false) => {
+            if (!Number.isFinite(root.offsetWidth) || !Number.isFinite(root.offsetHeight)) return;
+            const maxX = Math.max(0, innerWidth - root.offsetWidth);
+            const maxY = Math.max(0, innerHeight - root.offsetHeight);
+            const currentX = Number.isFinite(settings.position?.x) ? settings.position.x : root.offsetLeft;
+            const currentY = Number.isFinite(settings.position?.y) ? settings.position.y : root.offsetTop;
+            if (!Number.isFinite(currentX) || !Number.isFinite(currentY)) return;
+            const x = Math.max(0, Math.min(maxX, currentX));
+            const y = Math.max(0, Math.min(maxY, currentY));
+            root.style.left = `${x}px`;
+            root.style.top = `${y}px`;
+            root.style.right = "auto";
+            if (persist && (settings.position?.x !== x || settings.position?.y !== y)) {
+                settings.position = { x, y };
+                save();
+            }
+        };
+
+        if (settings.position && Number.isFinite(settings.position.x) && Number.isFinite(settings.position.y)) {
             root.style.left = `${settings.position.x}px`;
             root.style.top = `${settings.position.y}px`;
             root.style.right = "auto";
+            constrainRootPosition(true);
         }
 
         let drag = null;
@@ -1687,8 +1704,10 @@
 
         bar.addEventListener("pointermove", (event) => {
             if (!drag) return;
-            const x = Math.max(10, Math.min(innerWidth - root.offsetWidth - 10, drag.left + event.clientX - drag.x));
-            const y = Math.max(10, Math.min(innerHeight - root.offsetHeight - 10, drag.top + event.clientY - drag.y));
+            const maxX = Math.max(0, innerWidth - root.offsetWidth);
+            const maxY = Math.max(0, innerHeight - root.offsetHeight);
+            const x = Math.max(0, Math.min(maxX, drag.left + event.clientX - drag.x));
+            const y = Math.max(0, Math.min(maxY, drag.top + event.clientY - drag.y));
             root.style.left = `${x}px`;
             root.style.top = `${y}px`;
             root.style.right = "auto";
@@ -1706,6 +1725,7 @@
 
         bar.addEventListener("pointerup", stopDrag);
         bar.addEventListener("pointercancel", stopDrag);
+        addEventListener("resize", () => constrainRootPosition(true));
 
         render();
 
