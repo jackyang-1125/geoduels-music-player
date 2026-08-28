@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         GeoDuels Lofi / Chill Player (with Custom MP3)
 // @namespace    https://geoduels.io/
-// @version      4.4.6
+// @version      4.4.9
 // @description  Modern music player for GeoDuels with stable Lobby detection, startup playback modes, Ranked and Party detection, custom MP3 upload with looping, and a glass UI.
 // @match        https://geoduels.io/*
 // @match        https://*.geoduels.io/*
@@ -93,6 +93,7 @@
         streamIndex: Number.isInteger(saved.streamIndex) && saved.streamIndex >= 0 ? saved.streamIndex : defaults.streamIndex,
         scopes: { ...defaults.scopes, ...(saved.scopes || {}) },
         position: saved.position || null,
+        positionMode: saved.positionMode === "manual" ? "manual" : "header",
         youtubePlaylistId: typeof saved.youtubePlaylistId === "string" ? saved.youtubePlaylistId : defaults.youtubePlaylistId,
         youtubeVideoId: typeof saved.youtubeVideoId === "string" ? saved.youtubeVideoId : defaults.youtubeVideoId,
         youtubeMediaType: saved.youtubeMediaType === "video" ? "video" : defaults.youtubeMediaType,
@@ -1369,6 +1370,9 @@
             #geoduels-lofi-player .gdl-yt-help { font-size:12px; line-height:1.5; }
             #geoduels-lofi-player .gdl-yt-input { font-size:14px; font-weight:400; }
             #geoduels-lofi-player .gdl-yt-btn { font-size:12px; font-weight:500; }
+            #geoduels-lofi-player .gdl-reset-row { display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:6px; margin-top:10px; }
+            #geoduels-lofi-player .gdl-reset-btn { min-height:31px; padding:6px 5px; border:1px solid rgba(52,211,153,.35); border-radius:7px; background:rgba(16,185,129,.16); color:#34d399; font:500 10px/1.2 inherit; cursor:pointer; }
+            #geoduels-lofi-player .gdl-reset-btn:hover { background:rgba(16,185,129,.28); color:#fff; }
             #geoduels-lofi-player .gdl-tabs { display:flex; width:100%; min-width:0; gap:3px; overflow:hidden; }
             #geoduels-lofi-player .gdl-tabs .gdl-tab { flex:1 1 0; min-width:0; width:0; max-width:none; overflow:hidden; padding:6px 2px; font-size:9px; line-height:12px; letter-spacing:0; white-space:nowrap; text-overflow:clip; }
         </style>
@@ -1472,6 +1476,10 @@
                 <span class="gdl-kbd">Alt</span>+<span class="gdl-kbd">H</span> Hide UI • <span class="gdl-kbd">Alt</span>+<span class="gdl-kbd">[</span>/<span class="gdl-kbd">]</span> Vol
             </div>
 
+            <div class="gdl-reset-row">
+                <button class="gdl-reset-btn gdl-reset-settings" type="button">Reset Settings</button>
+                <button class="gdl-reset-btn gdl-reset-position" type="button">Reset Position</button>
+            </div>
             <button class="gdl-shutdown-btn" type="button">Shutdown App</button>
         </div>`;
 
@@ -1686,7 +1694,45 @@
             }
         };
 
-        if (settings.position && Number.isFinite(settings.position.x) && Number.isFinite(settings.position.y)) {
+        const placeAtHeaderSlot = (persist = true) => {
+            const online = document.querySelector('[aria-label*="players online" i]');
+            if (!online) return false;
+            const notifications = document.querySelector('[aria-label="Notifications"], [aria-label*="notification" i]');
+            const signIn = [...document.querySelectorAll('button, a')].find((element) => /^sign in$/i.test((element.innerText || '').trim()));
+            const onlineRect = online.getBoundingClientRect();
+            const referenceRect = notifications?.getBoundingClientRect() || onlineRect;
+            const width = root.offsetWidth || 100;
+            const height = root.offsetHeight || 40;
+            const gap = 8;
+            let x;
+            if (notifications) {
+                const firstRight = Math.min(referenceRect.right, onlineRect.right);
+                const secondLeft = Math.max(referenceRect.left, onlineRect.left);
+                const slotLeft = Math.min(firstRight, secondLeft) + gap;
+                const slotRight = Math.max(firstRight, secondLeft) - gap;
+                x = (slotLeft + slotRight - width) / 2;
+            } else if (signIn) {
+                const signInRect = signIn.getBoundingClientRect();
+                x = onlineRect.right + gap + (signInRect.left - gap - onlineRect.right - width) / 2;
+            } else {
+                x = onlineRect.left - width - gap;
+            }
+            x = Math.max(0, Math.min(Math.max(0, innerWidth - width), x));
+            const y = Math.max(0, Math.min(Math.max(0, innerHeight - height), onlineRect.top + (onlineRect.height - height) / 2));
+            root.style.left = `${x}px`;
+            root.style.top = `${y}px`;
+            root.style.right = "auto";
+            if (persist) {
+                settings.position = { x, y };
+                settings.positionMode = "header";
+                save();
+            }
+            return true;
+        };
+
+        if (settings.positionMode === "header" || !settings.position) {
+            placeAtHeaderSlot(true);
+        } else if (settings.position && Number.isFinite(settings.position.x) && Number.isFinite(settings.position.y)) {
             root.style.left = `${settings.position.x}px`;
             root.style.top = `${settings.position.y}px`;
             root.style.right = "auto";
@@ -1719,13 +1765,43 @@
                 bar.releasePointerCapture(event.pointerId);
             }
             settings.position = { x: root.offsetLeft, y: root.offsetTop };
+            settings.positionMode = "manual";
             save();
             drag = null;
         };
 
         bar.addEventListener("pointerup", stopDrag);
         bar.addEventListener("pointercancel", stopDrag);
-        addEventListener("resize", () => constrainRootPosition(true));
+        addEventListener("resize", () => {
+            if (settings.positionMode === "header") placeAtHeaderSlot(true);
+            else constrainRootPosition(true);
+        });
+        const headerAnchorObserver = new MutationObserver(() => {
+            if (settings.positionMode === "header") placeAtHeaderSlot(false);
+        });
+        headerAnchorObserver.observe(document.body, { childList: true, subtree: true });
+
+        root.querySelector(".gdl-reset-position")?.addEventListener("click", () => {
+            settings.positionMode = "header";
+            placeAtHeaderSlot(true);
+            showToast("Position reset");
+        });
+        root.querySelector(".gdl-reset-settings")?.addEventListener("click", () => {
+            if (!confirm("Reset all player settings to defaults?")) return;
+            Object.assign(settings, JSON.parse(JSON.stringify(defaults)));
+            settings.uiHidden = false;
+            settings.positionMode = "header";
+            settings.position = null;
+            audio.pause();
+            youtubePlaying = false;
+            if (youtubeFrame) {
+                sendYouTubeCommand("stopVideo");
+                youtubeFrame.src = "about:blank";
+                youtubeFrame.style.display = "none";
+            }
+            save();
+            window.location.reload();
+        });
 
         render();
 
